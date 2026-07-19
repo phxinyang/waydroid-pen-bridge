@@ -1,0 +1,7 @@
+{
+  "uuid": "waydroid-pen-mode@sheng",
+  "name": "Waydroid Pen Mode",
+  "description": "Route the Xiaomi pen through a stable proxy with automatic, Waydroid and desktop modes.",
+  "shell-version": ["50"],
+  "url": "https://github.com/phxinyang/waydroid-pen-mode"
+}
