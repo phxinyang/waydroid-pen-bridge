@@ -2,6 +2,7 @@
 
 import fcntl
 import json
+import math
 import os
 from pathlib import Path
 import selectors
@@ -16,6 +17,7 @@ CONFIG_PATH = Path("/etc/waydroid-pen-mode.conf")
 DEFAULTS = {
     "DEVICE_NAME": "NVTCapacitivePenM80p",
     "PROXY_PHYS": "waydroid-pen-relay",
+    "ANDROID_PROXY_PHYS": "waydroid-pen-android",
     "DIRECT_Y_MIN": "600",
     "CONTROL_SOCKET": "/run/waydroid-pen-mode/control.sock",
     "STATE_PATH": "/run/waydroid-pen-mode/state.json",
@@ -97,7 +99,7 @@ def load_config():
     return config
 
 
-def find_real_event(device_name, proxy_phys):
+def find_real_event(device_name, proxy_physes):
     for event_path in sorted(Path("/sys/class/input").glob("event*")):
         device_path = event_path / "device"
         try:
@@ -110,7 +112,7 @@ def find_real_event(device_name, proxy_phys):
             )
         except OSError:
             continue
-        if name == device_name and phys != proxy_phys:
+        if name == device_name and phys not in proxy_physes:
             return Path("/dev/input") / event_path.name
     return None
 
@@ -138,7 +140,7 @@ def make_abs_setup(code, minimum, maximum, resolution=0):
 
 
 class VirtualPen:
-    def __init__(self, name, phys):
+    def __init__(self, name, phys, y_min=0):
         self.fd = os.open("/dev/uinput", os.O_WRONLY | os.O_CLOEXEC)
         try:
             for event_type in (EV_KEY, EV_ABS):
@@ -167,7 +169,7 @@ class VirtualPen:
             fcntl.ioctl(self.fd, UI_DEV_SETUP, setup)
             for axis in (
                 make_abs_setup(ABS_X, 0, 30479, 113),
-                make_abs_setup(ABS_Y, 0, 20319, 113),
+                make_abs_setup(ABS_Y, y_min, 20319, 113),
                 make_abs_setup(ABS_PRESSURE, 0, 16384),
                 make_abs_setup(ABS_DISTANCE, 0, 1),
                 make_abs_setup(ABS_TILT_X, -60, 60),
@@ -218,6 +220,138 @@ class VirtualPen:
             self.fd = -1
 
 
+class AndroidFrameMapper:
+    X_MIN = 0
+    X_MAX = 30479
+    SOURCE_Y_MIN = 0
+    Y_MAX = 20319
+
+    def __init__(self, output, output_y_min):
+        self.output = output
+        self.output_y_min = output_y_min
+        self.geometry = None
+        self.events = []
+        self.axes = {
+            ABS_X: None,
+            ABS_Y: None,
+            ABS_PRESSURE: 0,
+            ABS_DISTANCE: 0,
+            ABS_TILT_X: 0,
+            ABS_TILT_Y: 0,
+        }
+        self.keys = {
+            BTN_TOOL_PEN: 0,
+            BTN_TOUCH: 0,
+            BTN_STYLUS: 0,
+            BTN_STYLUS2: 0,
+        }
+        self.active = False
+
+    def set_geometry(self, geometry):
+        if geometry is not None:
+            x, y, width, height = geometry
+            if not all(math.isfinite(value) for value in geometry):
+                raise RelayError("mapping values must be finite")
+            if width <= 0 or height <= 0:
+                raise RelayError("mapping width and height must be positive")
+            if x < 0 or y < 0 or x + width > 1 or y + height > 1:
+                raise RelayError("mapping must fit inside the display")
+            geometry = tuple(float(value) for value in geometry)
+        if geometry == self.geometry:
+            return
+        self.release()
+        self.geometry = geometry
+
+    def release(self):
+        if self.active:
+            self.output.release()
+        self.active = False
+
+    def feed(self, data, enabled):
+        for offset in range(0, len(data), INPUT_EVENT.size):
+            event = INPUT_EVENT.unpack_from(data, offset)
+            _, _, event_type, code, value = event
+            if event_type == EV_ABS and code in self.axes:
+                self.axes[code] = value
+            elif event_type == EV_KEY and code in self.keys:
+                self.keys[code] = value
+            self.events.append(event)
+            if event_type == EV_SYN and code == SYN_REPORT:
+                if enabled:
+                    mapped = self._map_frame()
+                    if mapped:
+                        self.output.write(mapped)
+                self.events.clear()
+
+    def _map_frame(self):
+        x = self.axes[ABS_X]
+        y = self.axes[ABS_Y]
+        if x is None or y is None:
+            return b""
+
+        mapped = self._map_point(x, y)
+        if mapped is None:
+            self.release()
+            return b""
+
+        mapped_x, mapped_y = mapped
+        if not self.active:
+            self.active = True
+            return self._snapshot(mapped_x, mapped_y)
+
+        mapped_events = []
+        for seconds, microseconds, event_type, code, value in self.events:
+            if event_type == EV_ABS and code == ABS_X:
+                value = mapped_x
+            elif event_type == EV_ABS and code == ABS_Y:
+                value = mapped_y
+            mapped_events.append(
+                INPUT_EVENT.pack(
+                    seconds, microseconds, event_type, code, value
+                )
+            )
+        return b"".join(mapped_events)
+
+    def _map_point(self, x, y):
+        source_x = (x - self.X_MIN) / (self.X_MAX - self.X_MIN)
+        source_y = (y - self.SOURCE_Y_MIN) / (
+            self.Y_MAX - self.SOURCE_Y_MIN
+        )
+        geometry = self.geometry or (0.0, 0.0, 1.0, 1.0)
+        left, top, width, height = geometry
+        if not (left <= source_x <= left + width):
+            return None
+        if not (top <= source_y <= top + height):
+            return None
+        target_x = round((source_x - left) / width * self.X_MAX)
+        target_y = round(
+            self.output_y_min
+            + (source_y - top)
+            / height
+            * (self.Y_MAX - self.output_y_min)
+        )
+        return (
+            min(self.X_MAX, max(self.X_MIN, target_x)),
+            min(self.Y_MAX, max(self.output_y_min, target_y)),
+        )
+
+    def _snapshot(self, x, y):
+        events = [
+            make_event(EV_KEY, BTN_TOOL_PEN, self.keys[BTN_TOOL_PEN]),
+            make_event(EV_KEY, BTN_TOUCH, self.keys[BTN_TOUCH]),
+            make_event(EV_KEY, BTN_STYLUS, self.keys[BTN_STYLUS]),
+            make_event(EV_KEY, BTN_STYLUS2, self.keys[BTN_STYLUS2]),
+            make_event(EV_ABS, ABS_X, x),
+            make_event(EV_ABS, ABS_Y, y),
+            make_event(EV_ABS, ABS_PRESSURE, self.axes[ABS_PRESSURE]),
+            make_event(EV_ABS, ABS_DISTANCE, self.axes[ABS_DISTANCE]),
+            make_event(EV_ABS, ABS_TILT_X, self.axes[ABS_TILT_X]),
+            make_event(EV_ABS, ABS_TILT_Y, self.axes[ABS_TILT_Y]),
+            make_event(EV_SYN, SYN_REPORT, 0),
+        ]
+        return b"".join(events)
+
+
 class PenRelay:
     def __init__(self, config):
         self.config = config
@@ -228,6 +362,14 @@ class PenRelay:
         self.device_fd = None
         self.input_buffer = bytearray()
         self.proxy = VirtualPen(config["DEVICE_NAME"], config["PROXY_PHYS"])
+        self.android_proxy = VirtualPen(
+            config["DEVICE_NAME"],
+            config["ANDROID_PROXY_PHYS"],
+            int(config["DIRECT_Y_MIN"]),
+        )
+        self.android_mapper = AndroidFrameMapper(
+            self.android_proxy, int(config["DIRECT_Y_MIN"])
+        )
         self.server = self._create_server(Path(config["CONTROL_SOCKET"]))
         self.selector.register(self.server, selectors.EVENT_READ, "control")
         self._write_state()
@@ -251,6 +393,7 @@ class PenRelay:
                     "mode": self.mode,
                     "device": str(self.device) if self.device else None,
                     "forwarding": self.mode == "desktop",
+                    "mapping": self.android_mapper.geometry,
                 },
                 sort_keys=True,
             ),
@@ -263,6 +406,7 @@ class PenRelay:
             "mode": self.mode,
             "device": str(self.device) if self.device else None,
             "forwarding": self.mode == "desktop",
+            "mapping": self.android_mapper.geometry,
         }
 
     def set_mode(self, mode):
@@ -272,6 +416,8 @@ class PenRelay:
             return self._response()
         if mode == "direct":
             self.proxy.release()
+        else:
+            self.android_mapper.release()
         self.mode = mode
         self._write_state()
         return self._response()
@@ -279,6 +425,15 @@ class PenRelay:
     def forward(self, data):
         if self.mode == "desktop":
             self.proxy.write(data)
+        self.android_mapper.feed(data, self.mode == "direct")
+
+    def set_mapping(self, values):
+        if values is None:
+            self.android_mapper.set_geometry(None)
+        else:
+            self.android_mapper.set_geometry(tuple(float(value) for value in values))
+        self._write_state()
+        return self._response()
 
     def _accept_command(self):
         connection, _ = self.server.accept()
@@ -288,6 +443,13 @@ class PenRelay:
                 command = connection.recv(128).decode("ascii").strip()
                 if command == "status":
                     response = self._response()
+                elif command == "unmap":
+                    response = self.set_mapping(None)
+                elif command.startswith("map "):
+                    values = command.split()[1:]
+                    if len(values) != 4:
+                        raise RelayError("usage: map X Y WIDTH HEIGHT")
+                    response = self.set_mapping(values)
                 else:
                     response = self.set_mode(command)
             except Exception as error:
@@ -308,7 +470,8 @@ class PenRelay:
 
     def _open_device(self):
         node = find_real_event(
-            self.config["DEVICE_NAME"], self.config["PROXY_PHYS"]
+            self.config["DEVICE_NAME"],
+            {self.config["PROXY_PHYS"], self.config["ANDROID_PROXY_PHYS"]},
         )
         if node is None:
             return
@@ -358,6 +521,7 @@ class PenRelay:
         self.server.close()
         Path(self.config["CONTROL_SOCKET"]).unlink(missing_ok=True)
         self.proxy.close()
+        self.android_proxy.close()
         self.selector.close()
 
 

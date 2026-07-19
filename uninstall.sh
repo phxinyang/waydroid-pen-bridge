@@ -4,7 +4,8 @@ set -euo pipefail
 UUID=waydroid-pen-mode@sheng
 HELPER=/usr/local/libexec/waydroid-pen-mode
 LXC_CONFIG=/var/lib/waydroid/lxc/waydroid/config_nodes
-LXC_LINE='lxc.mount.entry = /dev/input/waydroid-pen dev/waydroid_pen none bind,create=file,optional 0 0'
+LXC_LINE='lxc.mount.entry = /dev/input/waydroid-android-pen dev/waydroid_pen none bind,create=file,optional 0 0'
+LEGACY_LXC_LINE='lxc.mount.entry = /dev/input/waydroid-pen dev/waydroid_pen none bind,create=file,optional 0 0'
 INSTALL_USER=${SUDO_USER:-$USER}
 INSTALL_HOME=$(getent passwd "$INSTALL_USER" | cut -d: -f6)
 
@@ -18,9 +19,9 @@ if waydroid status 2>/dev/null | grep -q $'Container:\tRUNNING'; then
         persist.device_config.input_native_boot.palm_rejection_enabled '' || true
 fi
 
-if [[ -f "$LXC_CONFIG" ]] && grep -Fqx "$LXC_LINE" "$LXC_CONFIG"; then
+if [[ -f "$LXC_CONFIG" ]] && { grep -Fqx "$LXC_LINE" "$LXC_CONFIG" || grep -Fqx "$LEGACY_LXC_LINE" "$LXC_CONFIG"; }; then
     config_tmp=$(mktemp)
-    grep -Fvx "$LXC_LINE" "$LXC_CONFIG" >"$config_tmp"
+    grep -Fvx "$LXC_LINE" "$LXC_CONFIG" | grep -Fvx "$LEGACY_LXC_LINE" >"$config_tmp"
     sudo install -o root -g root -m 0644 "$config_tmp" "$LXC_CONFIG"
     rm "$config_tmp"
 fi

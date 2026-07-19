@@ -2,6 +2,7 @@
 
 import fcntl
 import json
+import math
 import os
 from pathlib import Path
 import socket
@@ -153,11 +154,33 @@ def status(config):
     print(json.dumps(result, ensure_ascii=False, sort_keys=True))
 
 
+def set_mapping(config, arguments):
+    if len(arguments) == 1 and arguments[0] == "unmap":
+        return relay_command(config, "unmap")
+    if len(arguments) != 5 or arguments[0] != "map":
+        raise ModeError("usage: waydroid-pen-mode map X Y WIDTH HEIGHT")
+    try:
+        values = [float(value) for value in arguments[1:]]
+    except ValueError as error:
+        raise ModeError("mapping values must be numbers") from error
+    if not all(math.isfinite(value) for value in values):
+        raise ModeError("mapping values must be finite")
+    x, y, width, height = values
+    if width <= 0 or height <= 0:
+        raise ModeError("mapping width and height must be positive")
+    if x < 0 or y < 0 or x + width > 1 or y + height > 1:
+        raise ModeError("mapping must fit inside the display")
+    command = "map " + " ".join(f"{value:.9f}" for value in values)
+    return relay_command(config, command)
+
+
 def main():
     if os.geteuid() != 0:
         raise ModeError("must run as root")
-    if len(sys.argv) != 2 or sys.argv[1] not in {"direct", "desktop", "status"}:
-        raise ModeError("usage: waydroid-pen-mode {direct|desktop|status}")
+    if len(sys.argv) < 2:
+        raise ModeError(
+            "usage: waydroid-pen-mode {direct|desktop|status|map|unmap}"
+        )
 
     config = load_config()
     LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -165,13 +188,26 @@ def main():
         fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
         command = sys.argv[1]
         if command == "direct":
+            if len(sys.argv) != 2:
+                raise ModeError("usage: waydroid-pen-mode direct")
             result = direct_mode(config)
             print(f"direct {result.get('device', '')}".rstrip())
         elif command == "desktop":
+            if len(sys.argv) != 2:
+                raise ModeError("usage: waydroid-pen-mode desktop")
             result = desktop_mode(config)
             print(f"desktop {result.get('device', '')}".rstrip())
-        else:
+        elif command == "status":
+            if len(sys.argv) != 2:
+                raise ModeError("usage: waydroid-pen-mode status")
             status(config)
+        elif command in {"map", "unmap"}:
+            result = set_mapping(config, sys.argv[1:])
+            print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+        else:
+            raise ModeError(
+                "usage: waydroid-pen-mode {direct|desktop|status|map|unmap}"
+            )
 
 
 if __name__ == "__main__":

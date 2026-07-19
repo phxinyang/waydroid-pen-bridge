@@ -5,6 +5,9 @@ ATTRS{name}!="NVTCapacitivePenM80p", GOTO="waydroid_pen_mode_end"
 # The stable proxy remains visible to GNOME for the whole login session.
 ATTRS{phys}=="waydroid-pen-relay", OWNER="@USER_UID@", GROUP="@ANDROID_INPUT_GROUP@", MODE="0660", ENV{ID_INPUT}="1", ENV{ID_INPUT_TABLET}="1", GOTO="waydroid_pen_mode_end"
 
+# The mapped proxy is mounted into Waydroid and must stay hidden from libinput.
+ATTRS{phys}=="waydroid-pen-android", OWNER="@USER_UID@", GROUP="@ANDROID_INPUT_GROUP@", MODE="0660", SYMLINK+="input/waydroid-android-pen", ENV{LIBINPUT_IGNORE_DEVICE}="1", GOTO="waydroid_pen_mode_end"
+
 # The THP-created physical device is consumed by the relay and optionally Android.
 OWNER="@USER_UID@", GROUP="@ANDROID_INPUT_GROUP@", MODE="0660", SYMLINK+="input/waydroid-pen", ENV{LIBINPUT_IGNORE_DEVICE}="1"
 

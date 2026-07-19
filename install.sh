@@ -8,7 +8,8 @@ RELAY=/usr/local/libexec/waydroid-pen-relay
 RELAY_UNIT=/etc/systemd/system/waydroid-pen-relay.service
 WAYDROID_DROPIN=/etc/systemd/system/waydroid-container.service.d/90-pen-relay.conf
 LXC_CONFIG=/var/lib/waydroid/lxc/waydroid/config_nodes
-LXC_LINE='lxc.mount.entry = /dev/input/waydroid-pen dev/waydroid_pen none bind,create=file,optional 0 0'
+LXC_LINE='lxc.mount.entry = /dev/input/waydroid-android-pen dev/waydroid_pen none bind,create=file,optional 0 0'
+LEGACY_LXC_LINE='lxc.mount.entry = /dev/input/waydroid-pen dev/waydroid_pen none bind,create=file,optional 0 0'
 RULE_PATH=/etc/udev/rules.d/99-waydroid-pen-mode.rules
 LEGACY_RULE_PATH=/etc/udev/rules.d/99-waydroid-evdev-pen.rules
 SUDOERS_PATH=/etc/sudoers.d/waydroid-pen-mode
@@ -60,13 +61,26 @@ sudoers_tmp=$(mktemp)
     printf '%s ALL=(root) NOPASSWD: %s direct\n' "$INSTALL_USER" "$HELPER"
     printf '%s ALL=(root) NOPASSWD: %s desktop\n' "$INSTALL_USER" "$HELPER"
     printf '%s ALL=(root) NOPASSWD: %s status\n' "$INSTALL_USER" "$HELPER"
+    printf '%s ALL=(root) NOPASSWD: %s map *\n' "$INSTALL_USER" "$HELPER"
+    printf '%s ALL=(root) NOPASSWD: %s unmap\n' "$INSTALL_USER" "$HELPER"
 } >"$sudoers_tmp"
 sudo visudo -cf "$sudoers_tmp" >/dev/null
 sudo install -D -o root -g root -m 0440 "$sudoers_tmp" "$SUDOERS_PATH"
 rm "$sudoers_tmp"
 
-if ! grep -Fqx "$LXC_LINE" "$LXC_CONFIG"; then
+lxc_backed_up=false
+if grep -Fqx "$LEGACY_LXC_LINE" "$LXC_CONFIG"; then
     sudo cp -a "$LXC_CONFIG" "$LXC_CONFIG.wayland-pen-mode-backup-$(date +%Y%m%d-%H%M%S)"
+    lxc_backed_up=true
+    config_tmp=$(mktemp)
+    grep -Fvx "$LEGACY_LXC_LINE" "$LXC_CONFIG" >"$config_tmp"
+    sudo install -o root -g root -m 0644 "$config_tmp" "$LXC_CONFIG"
+    rm "$config_tmp"
+fi
+if ! grep -Fqx "$LXC_LINE" "$LXC_CONFIG"; then
+    if [[ "$lxc_backed_up" == false ]]; then
+        sudo cp -a "$LXC_CONFIG" "$LXC_CONFIG.wayland-pen-mode-backup-$(date +%Y%m%d-%H%M%S)"
+    fi
     printf '%s\n' "$LXC_LINE" | sudo tee -a "$LXC_CONFIG" >/dev/null
 fi
 
@@ -92,5 +106,5 @@ sudo udevadm control --reload-rules
 sudo systemctl daemon-reload
 sudo systemctl enable waydroid-pen-relay.service >/dev/null
 
-echo "Installed. Reboot once so GNOME starts with the stable proxy instead of the physical pen."
+echo "Installed. Restart Waydroid, then reboot once so the desktop starts with the stable proxy."
 echo "After login, enable the Waydroid Pen Mode extension."

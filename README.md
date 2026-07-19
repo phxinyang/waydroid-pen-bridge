@@ -1,11 +1,11 @@
 # Waydroid Pen Mode
 
-Routes the Xiaomi Pad 6S Pro (`sheng`) pen between GNOME and Waydroid without
-hot-removing a tablet device from Mutter.
+Routes the Xiaomi Pad 6S Pro (`sheng`) pen between the desktop and Waydroid
+without hot-removing a tablet device from the compositor.
 
 The physical `NVTCapacitivePenM80p` device is always ignored by libinput. A
-small system service creates one stable virtual pen for GNOME and keeps it for
-the full login session.
+small system service creates stable virtual pens for the desktop and Android
+and keeps both for the full login session.
 
 ## Policies
 
@@ -23,12 +23,17 @@ Waydroid. It takes effect the next time the Waydroid container starts.
 
 ## Runtime modes
 
-- **Desktop:** the relay copies pen events to the stable GNOME proxy and the
+- **Desktop:** the relay copies pen events to the stable desktop proxy and the
   Android direct link is absent.
-- **Direct:** the relay releases and pauses the GNOME proxy while Android reads
-  the original evdev device.
+- **Direct:** the relay releases and pauses the desktop proxy, maps physical
+  screen coordinates into the Waydroid content rectangle, and writes the
+  transformed events to the Android proxy.
 
 No input device is created or destroyed while changing modes.
+
+The GNOME extension follows Waydroid window moves, resizes, fullscreen changes,
+monitor scale and monitor position. Pen events outside the Waydroid content
+rectangle are suppressed in Android.
 
 ## Requirements
 
@@ -60,6 +65,15 @@ Manual runtime selection:
 sudo /usr/local/libexec/waydroid-pen-mode desktop
 sudo /usr/local/libexec/waydroid-pen-mode direct
 ```
+
+Set a normalized Waydroid content rectangle manually:
+
+```bash
+sudo /usr/local/libexec/waydroid-pen-mode map X Y WIDTH HEIGHT
+sudo /usr/local/libexec/waydroid-pen-mode unmap
+```
+
+`unmap` restores full-display identity mapping.
 
 ## Uninstall
 
