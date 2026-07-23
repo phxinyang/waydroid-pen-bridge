@@ -1,0 +1,16 @@
+{
+    "KPackageStructure": "KWin/Script",
+    "KPlugin": {
+        "Authors": [
+            {
+                "Name": "xinyang"
+            }
+        ],
+        "Description": "Report Waydroid focus and geometry to the shared pen mode service",
+        "EnabledByDefault": false,
+        "Id": "waydroid-pen-mode",
+        "License": "MIT",
+        "Name": "Waydroid Pen Mode"
+    },
+    "X-Plasma-API": "declarativescript"
+}

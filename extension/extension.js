@@ -11,7 +11,7 @@ import {
     SystemIndicator,
 } from 'resource:///org/gnome/shell/ui/quickSettings.js';
 
-const HELPER = '/usr/local/libexec/waydroid-pen-mode';
+const SESSION_HELPER = '/usr/local/libexec/waydroid-pen-session';
 const POLICIES = ['auto', 'waydroid', 'desktop'];
 const LABELS = {
     auto: '自动',
@@ -72,30 +72,44 @@ export default class WaydroidPenModeExtension extends Extension {
             GLib.get_user_config_dir(), 'waydroid-pen-mode', 'policy',
         ]);
         this.policy = this._loadPolicy();
-        this._desiredMode = null;
-        this._appliedMode = null;
-        this._desiredMapping = null;
-        this._appliedMappingKey = null;
-        this._mappingKnown = false;
+        const sourceEpoch = Math.floor(GLib.get_real_time() / 1000);
+        const sourceNonce = Math.floor(GLib.get_monotonic_time() % 1000000);
+        this._sourceId = `gnome_${sourceEpoch}_${sourceNonce}`;
+        this._generation = 0;
+        this._overviewActive = Main.overview.visible;
         this._trackedWindow = null;
-        this._running = false;
         this._timerId = 0;
+        this._contextRunning = false;
+        this._pendingContext = null;
 
         this._indicator = new PenModeIndicator(this);
         Main.panel.statusArea.quickSettings.addExternalIndicator(this._indicator);
         global.display.connectObject(
             'notify::focus-window', () => {
-                this._trackFocusedWindow();
-                if (this.policy === 'auto')
-                    this._queueSync();
+                this._trackWaydroidWindow();
+                this._queueContext();
             }, this);
-        this._trackFocusedWindow();
-        this._queueSync();
+        Main.overview.connectObject(
+            'showing', () => {
+                this._overviewActive = true;
+                this._queueContext(0);
+            },
+            'hidden', () => {
+                this._overviewActive = false;
+                this._queueContext(0);
+            },
+            this);
+        Main.layoutManager.connectObject(
+            'monitors-changed', () => this._queueContext(80), this);
+        this._trackWaydroidWindow();
+        this._queueContext(0);
     }
 
     disable() {
         this._enabled = false;
         global.display.disconnectObject(this);
+        Main.overview.disconnectObject(this);
+        Main.layoutManager.disconnectObject(this);
         this._trackedWindow?.disconnectObject(this);
         this._trackedWindow = null;
         if (this._timerId) {
@@ -105,19 +119,23 @@ export default class WaydroidPenModeExtension extends Extension {
         this._indicator?.destroy();
         this._indicator = null;
 
-        this._desiredMode = 'desktop';
-        this._desiredMapping = null;
-        this._runDesiredMode();
+        this._generation += 1;
+        this._spawnSession([
+            'context', this._sourceId, String(this._generation),
+            '0', '1', 'none',
+        ]);
     }
 
     setPolicy(policy) {
         if (!POLICIES.includes(policy) || policy === this.policy)
             return;
-        this.policy = policy;
-        GLib.mkdir_with_parents(GLib.path_get_dirname(this._policyPath), 0o700);
-        GLib.file_set_contents(this._policyPath, policy);
-        this._indicator?.toggle.updatePolicy(policy);
-        this._queueSync();
+        this._spawnSession(['policy', policy], succeeded => {
+            if (!succeeded || !this._enabled)
+                return;
+            this.policy = policy;
+            this._indicator?.toggle.updatePolicy(policy);
+            this._queueContext(0);
+        });
     }
 
     _loadPolicy() {
@@ -129,37 +147,85 @@ export default class WaydroidPenModeExtension extends Extension {
                     return policy;
             }
         } catch {
-            // The default is safe and needs no persisted file.
+            // The shared session helper creates the default on first use.
         }
         return 'auto';
     }
 
-    _queueSync(delay = null) {
-        let mode;
-        if (this.policy === 'waydroid')
-            mode = 'direct';
-        else if (this.policy === 'desktop')
-            mode = 'desktop';
-        else
-            mode = this._isWaydroidFocused() ? 'direct' : 'desktop';
-        this._desiredMode = mode;
-        this._desiredMapping = mode === 'direct'
-            ? this._getWaydroidMapping()
-            : null;
-
+    _queueContext(delay = 100) {
+        if (!this._enabled)
+            return;
         if (this._timerId)
             GLib.source_remove(this._timerId);
-        const timeout = delay ?? (mode === 'direct' ? 50 : 150);
         this._timerId = GLib.timeout_add(
-            GLib.PRIORITY_DEFAULT, timeout, () => {
+            GLib.PRIORITY_DEFAULT, delay, () => {
                 this._timerId = 0;
-                this._runDesiredMode();
+                this._submitContext();
                 return GLib.SOURCE_REMOVE;
             });
     }
 
-    _isWaydroidFocused() {
-        return this._isWaydroidWindow(global.display.focus_window);
+    _submitContext() {
+        this._generation += 1;
+        const focused = this._isWaydroidWindow(global.display.focus_window);
+        const mapping = this._getWaydroidMapping();
+        const arguments_ = [
+            'context',
+            this._sourceId,
+            String(this._generation),
+            focused ? '1' : '0',
+            this._overviewActive ? '1' : '0',
+        ];
+        if (mapping)
+            arguments_.push(...mapping.map(value => value.toFixed(9)));
+        else
+            arguments_.push('none');
+
+        if (this._contextRunning) {
+            this._pendingContext = arguments_;
+            return;
+        }
+        this._runContext(arguments_);
+    }
+
+    _runContext(arguments_) {
+        this._contextRunning = true;
+        this._spawnSession(arguments_, () => {
+            this._contextRunning = false;
+            const pending = this._pendingContext;
+            this._pendingContext = null;
+            if (pending && this._enabled)
+                this._runContext(pending);
+        });
+    }
+
+    _spawnSession(arguments_, done = null) {
+        let process;
+        try {
+            process = Gio.Subprocess.new(
+                [SESSION_HELPER, ...arguments_],
+                Gio.SubprocessFlags.STDOUT_PIPE |
+                Gio.SubprocessFlags.STDERR_PIPE);
+        } catch (error) {
+            console.error(`Waydroid Pen Mode: ${error.message}`);
+            done?.(false);
+            return;
+        }
+
+        process.communicate_utf8_async(null, null, (source, result) => {
+            let succeeded = false;
+            try {
+                const [, stdout, stderr] = source.communicate_utf8_finish(result);
+                succeeded = source.get_successful();
+                if (succeeded)
+                    console.log(`Waydroid Pen Mode: ${stdout.trim()}`);
+                else
+                    console.error(`Waydroid Pen Mode: ${stderr.trim()}`);
+            } catch (error) {
+                console.error(`Waydroid Pen Mode: ${error.message}`);
+            }
+            done?.(succeeded);
+        });
     }
 
     _isWaydroidWindow(window) {
@@ -201,32 +267,27 @@ export default class WaydroidPenModeExtension extends Extension {
         return null;
     }
 
-    _trackFocusedWindow() {
-        const window = global.display.focus_window;
-        const tracked = this._isWaydroidWindow(window) ? window : null;
+    _trackWaydroidWindow() {
+        const tracked = this._findWaydroidWindow();
         if (tracked === this._trackedWindow)
             return;
         this._trackedWindow?.disconnectObject(this);
         this._trackedWindow = tracked;
         this._trackedWindow?.connectObject(
-            'position-changed', () => this._queueSync(80),
-            'size-changed', () => this._queueSync(80),
-            'notify::fullscreen', () => this._queueSync(80),
+            'position-changed', () => this._queueContext(80),
+            'size-changed', () => this._queueContext(80),
+            'notify::fullscreen', () => this._queueContext(80),
             this);
     }
 
     _getWaydroidMapping() {
         const window = this._findWaydroidWindow();
-        if (!window) {
-            console.warn('Waydroid Pen Mode: no Waydroid window for mapping');
+        if (!window)
             return null;
-        }
         const monitorIndex = window.get_monitor();
         const monitor = Main.layoutManager.monitors[monitorIndex];
-        if (!monitor) {
-            console.warn(`Waydroid Pen Mode: monitor ${monitorIndex} is unavailable`);
+        if (!monitor)
             return null;
-        }
 
         let rect;
         try {
@@ -238,88 +299,13 @@ export default class WaydroidPenModeExtension extends Extension {
         const top = Math.max(rect.y, monitor.y);
         const right = Math.min(rect.x + rect.width, monitor.x + monitor.width);
         const bottom = Math.min(rect.y + rect.height, monitor.y + monitor.height);
-        if (right <= left || bottom <= top) {
-            console.warn('Waydroid Pen Mode: Waydroid content is outside its monitor');
+        if (right <= left || bottom <= top)
             return null;
-        }
         return [
             (left - monitor.x) / monitor.width,
             (top - monitor.y) / monitor.height,
             (right - left) / monitor.width,
             (bottom - top) / monitor.height,
         ];
-    }
-
-    _mappingKey(mapping) {
-        return mapping?.map(value => value.toFixed(9)).join(' ') ?? 'unmap';
-    }
-
-    _runDesiredMode() {
-        if (this._running || !this._desiredMode)
-            return;
-
-        let requestedMode = null;
-        let requestedMapping = null;
-        const desiredMappingKey = this._mappingKey(this._desiredMapping);
-        if (this._desiredMode === 'desktop') {
-            if (this._appliedMode === 'desktop')
-                return;
-            requestedMode = 'desktop';
-        } else if (!this._mappingKnown ||
-            desiredMappingKey !== this._appliedMappingKey) {
-            requestedMapping = this._desiredMapping;
-        } else if (this._appliedMode !== 'direct') {
-            requestedMode = 'direct';
-        } else {
-            return;
-        }
-
-        const arguments_ = ['sudo', '-n', HELPER];
-        if (requestedMode) {
-            arguments_.push(requestedMode);
-        } else if (requestedMapping) {
-            arguments_.push(
-                'map', ...requestedMapping.map(value => value.toFixed(9)));
-        } else {
-            arguments_.push('unmap');
-        }
-        this._running = true;
-        let process;
-        try {
-            process = Gio.Subprocess.new(
-                arguments_,
-                Gio.SubprocessFlags.STDOUT_PIPE |
-                Gio.SubprocessFlags.STDERR_PIPE);
-        } catch (error) {
-            console.error(`Waydroid Pen Mode: ${error.message}`);
-            this._running = false;
-            this._queueSync(2000);
-            return;
-        }
-
-        process.communicate_utf8_async(null, null, (source, result) => {
-            let succeeded = false;
-            try {
-                const [, stdout, stderr] = source.communicate_utf8_finish(result);
-                if (source.get_successful()) {
-                    succeeded = true;
-                    if (requestedMode) {
-                        this._appliedMode = requestedMode;
-                    } else {
-                        this._appliedMappingKey = this._mappingKey(requestedMapping);
-                        this._mappingKnown = true;
-                    }
-                    console.log(`Waydroid Pen Mode: ${stdout.trim()}`);
-                } else {
-                    console.error(`Waydroid Pen Mode: ${stderr.trim()}`);
-                }
-            } catch (error) {
-                console.error(`Waydroid Pen Mode: ${error.message}`);
-            } finally {
-                this._running = false;
-                if (this._enabled)
-                    this._queueSync(succeeded ? 0 : 2000);
-            }
-        });
     }
 }

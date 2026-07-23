@@ -1,0 +1,7 @@
+[Unit]
+Description=Apply Waydroid pen desktop context
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/waydroid-pen-session apply %i
+TimeoutStartSec=15

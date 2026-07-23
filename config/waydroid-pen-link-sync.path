@@ -1,0 +1,11 @@
+[Unit]
+Description=Watch Xiaomi pen capability changes
+BindsTo=waydroid-pen-relay.service
+After=waydroid-pen-relay.service
+
+[Path]
+PathChanged=/run/waydroid-pen-mode/state.json
+Unit=waydroid-pen-link-sync.service
+
+[Install]
+WantedBy=multi-user.target

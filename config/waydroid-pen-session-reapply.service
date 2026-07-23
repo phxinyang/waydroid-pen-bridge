@@ -1,0 +1,7 @@
+[Unit]
+Description=Restore the saved Waydroid pen desktop context
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/waydroid-pen-session reapply
+TimeoutStartSec=15

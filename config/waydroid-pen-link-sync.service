@@ -1,0 +1,8 @@
+[Unit]
+Description=Synchronize Waydroid pen input links
+Requisite=waydroid-pen-relay.service
+After=waydroid-pen-relay.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/waydroid-pen-mode sync

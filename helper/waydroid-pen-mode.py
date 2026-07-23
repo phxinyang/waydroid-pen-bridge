@@ -12,12 +12,19 @@ import sys
 
 CONFIG_PATH = Path("/etc/waydroid-pen-mode.conf")
 LOCK_PATH = Path("/run/lock/waydroid-pen-mode.lock")
+LXC_PATH = "/var/lib/waydroid/lxc"
+LXC_NAME = "waydroid"
+ANDROID_PATH = "/system/bin:/system/xbin"
+COMMAND_TIMEOUT_SECONDS = 5.0
 
 DEFAULTS = {
     "CONTROL_SOCKET": "/run/waydroid-pen-mode/control.sock",
     "ANDROID_DEVICE": "/dev/waydroid_pen",
     "ANDROID_LINK": "/dev/input/event4",
     "ANDROID_LINK_TARGET": "../waydroid_pen",
+    "ANDROID_GESTURE_DEVICE": "/dev/waydroid_pen_gesture",
+    "ANDROID_GESTURE_LINK": "/dev/input/event5",
+    "ANDROID_GESTURE_LINK_TARGET": "../waydroid_pen_gesture",
 }
 
 
@@ -48,12 +55,28 @@ def run(command, *, check=True, capture=False):
         text=True,
         stdout=subprocess.PIPE if capture else subprocess.DEVNULL,
         stderr=subprocess.PIPE if capture else subprocess.DEVNULL,
+        timeout=COMMAND_TIMEOUT_SECONDS,
     )
 
 
 def waydroid_shell(*arguments, check=True, capture=False):
     return run(
-        ["/usr/bin/waydroid", "shell", "--", *arguments],
+        [
+            "/usr/bin/lxc-attach",
+            "-P",
+            LXC_PATH,
+            "-n",
+            LXC_NAME,
+            "--clear-env",
+            "--set-var",
+            f"PATH={ANDROID_PATH}",
+            "--",
+            "/system/bin/sh",
+            "-c",
+            'exec "$@"',
+            "waydroid-pen-mode",
+            *arguments,
+        ],
         check=check,
         capture=capture,
     )
@@ -61,11 +84,21 @@ def waydroid_shell(*arguments, check=True, capture=False):
 
 def waydroid_running():
     result = run(
-        ["/usr/bin/waydroid", "status"],
+        [
+            "/usr/bin/lxc-info",
+            "-P",
+            LXC_PATH,
+            "-n",
+            LXC_NAME,
+            "-sH",
+        ],
         check=False,
         capture=True,
     )
-    return result.returncode == 0 and "Container:\tRUNNING" in result.stdout
+    return result.returncode == 0 and result.stdout.strip() in {
+        "RUNNING",
+        "FROZEN",
+    }
 
 
 def android_readlink(link_path):
@@ -77,30 +110,162 @@ def android_readlink(link_path):
     return result.stdout.strip() or None
 
 
-def remove_android_link(config):
-    link_path = config["ANDROID_LINK"]
-    expected = config["ANDROID_LINK_TARGET"]
-    if android_readlink(link_path) == expected:
-        waydroid_shell("unlink", link_path, check=False)
+def android_path_exists(path):
+    if not waydroid_running():
+        return False
+    result = waydroid_shell(
+        "sh",
+        "-c",
+        (
+            'if [ -e "$1" ] || [ -L "$1" ]; then '
+            'printf present; else printf missing; fi'
+        ),
+        "waydroid-pen-mode",
+        path,
+        check=False,
+        capture=True,
+    )
+    state = result.stdout.strip()
+    if state == "present":
+        return True
+    if state == "missing":
+        return False
+    raise ModeError(f"failed to inspect Android path {path}")
 
 
-def ensure_android_link(config):
+def android_links(config):
+    return (
+        {
+            "device": config["ANDROID_DEVICE"],
+            "link": config["ANDROID_LINK"],
+            "target": config["ANDROID_LINK_TARGET"],
+            "capability": "pen",
+        },
+        {
+            "device": config["ANDROID_GESTURE_DEVICE"],
+            "link": config["ANDROID_GESTURE_LINK"],
+            "target": config["ANDROID_GESTURE_LINK_TARGET"],
+            "capability": "pro",
+        },
+    )
+
+
+def inspect_android_link(spec):
+    target = android_readlink(spec["link"])
+    if target == spec["target"]:
+        return "owned", target
+    if target is not None:
+        return "foreign", target
+    if android_path_exists(spec["link"]):
+        return "foreign", "<non-symlink>"
+    return "missing", None
+
+
+def remove_owned_android_links(config):
+    if not waydroid_running():
+        return
+    for spec in android_links(config):
+        state, _target = inspect_android_link(spec)
+        if state == "owned":
+            waydroid_shell("unlink", spec["link"], check=False)
+
+
+def sync_android_links(config, pro_available):
     if not waydroid_running():
         raise ModeError("Waydroid is not running")
 
-    device_path = config["ANDROID_DEVICE"]
-    probe = waydroid_shell("test", "-c", device_path, check=False)
-    if probe.returncode != 0:
-        raise ModeError(f"Waydroid device is missing: {device_path}")
+    specs = android_links(config)
+    states = {}
+    for spec in specs:
+        state, target = inspect_android_link(spec)
+        if state == "foreign":
+            raise ModeError(
+                f"refusing to replace Android link {spec['link']} -> {target}"
+            )
+        states[spec["capability"]] = state
 
-    link_path = config["ANDROID_LINK"]
-    expected = config["ANDROID_LINK_TARGET"]
-    target = android_readlink(link_path)
-    if target == expected:
-        return
-    if target is not None:
-        raise ModeError(f"refusing to replace Android link {link_path} -> {target}")
-    waydroid_shell("ln", "-s", expected, link_path)
+    required = {
+        spec["capability"]
+        for spec in specs
+        if spec["capability"] == "pen" or pro_available
+    }
+    for spec in specs:
+        if spec["capability"] not in required:
+            continue
+        probe = waydroid_shell("test", "-c", spec["device"], check=False)
+        if probe.returncode != 0:
+            raise ModeError(f"Waydroid device is missing: {spec['device']}")
+
+    for spec in specs:
+        if spec["capability"] not in required and states[spec["capability"]] == "owned":
+            waydroid_shell("unlink", spec["link"])
+
+    created = []
+    try:
+        for spec in specs:
+            if spec["capability"] not in required:
+                continue
+            if states[spec["capability"]] == "owned":
+                continue
+            waydroid_shell("ln", "-s", spec["target"], spec["link"])
+            created.append(spec)
+    except Exception:
+        for spec in reversed(created):
+            waydroid_shell("unlink", spec["link"], check=False)
+        raise
+
+
+def rollback_to_desktop(config):
+    try:
+        relay_command(config, "desktop")
+    except Exception as rollback_error:
+        print(f"relay rollback failed: {rollback_error}", file=sys.stderr)
+    remove_owned_android_links(config)
+
+
+def capability_snapshot(relay):
+    try:
+        generation = relay["capability_generation"]
+        pro_available = relay["pro_available"]
+    except (KeyError, TypeError) as error:
+        raise ModeError("pen relay returned an invalid capability state") from error
+    if isinstance(generation, bool) or not isinstance(generation, int):
+        raise ModeError("pen relay returned an invalid capability state")
+    if generation < 0 or not isinstance(pro_available, bool):
+        raise ModeError("pen relay returned an invalid capability state")
+    return generation, pro_available
+
+
+def capability_matches(left, right):
+    return capability_snapshot(left) == capability_snapshot(right)
+
+
+def prepare_direct_links(config, relay):
+    generation, pro_available = capability_snapshot(relay)
+    sync_android_links(config, pro_available)
+    current = relay_command(config, "status")
+    if not capability_matches(relay, current):
+        return None, current
+    return (generation, pro_available), current
+
+
+def reconcile_direct_links(config, relay):
+    for _attempt in range(3):
+        if relay.get("mode") != "direct":
+            raise ModeError("pen relay left direct mode during link sync")
+        prepared, current = prepare_direct_links(config, relay)
+        if prepared is None:
+            relay = current
+            continue
+        generation, pro_available = prepared
+        if pro_available and not current.get("android_pro_active"):
+            try:
+                return relay_command(config, f"activate-pro {generation}")
+            except ModeError:
+                relay = relay_command(config, "status")
+                continue
+        return current
+    raise ModeError("pen capability changed repeatedly during link sync")
 
 
 def relay_command(config, command):
@@ -123,21 +288,43 @@ def relay_command(config, command):
 
 
 def desktop_mode(config):
-    remove_android_link(config)
-    return relay_command(config, "desktop")
+    relay = relay_command(config, "desktop")
+    remove_owned_android_links(config)
+    return relay
 
 
 def direct_mode(config):
-    relay_command(config, "direct")
     try:
-        ensure_android_link(config)
+        relay = relay_command(config, "status")
+        for _attempt in range(3):
+            prepared, current = prepare_direct_links(config, relay)
+            if prepared is None:
+                relay = current
+                continue
+            generation, pro_available = prepared
+            try:
+                return relay_command(
+                    config,
+                    f"direct {generation} {int(pro_available)}",
+                )
+            except ModeError:
+                relay = relay_command(config, "status")
+        raise ModeError("pen capability changed repeatedly during direct switch")
     except Exception:
-        try:
-            relay_command(config, "desktop")
-        except Exception as rollback_error:
-            print(f"relay rollback failed: {rollback_error}", file=sys.stderr)
+        rollback_to_desktop(config)
         raise
-    return relay_command(config, "status")
+
+
+def sync_mode(config):
+    relay = relay_command(config, "status")
+    if relay.get("mode") != "direct":
+        remove_owned_android_links(config)
+        return relay
+    try:
+        return reconcile_direct_links(config, relay)
+    except Exception:
+        rollback_to_desktop(config)
+        raise
 
 
 def status(config):
@@ -149,6 +336,9 @@ def status(config):
         "mode": relay.get("mode"),
         "relay": relay,
         "android_link": android_readlink(config["ANDROID_LINK"]),
+        "android_gesture_link": android_readlink(
+            config["ANDROID_GESTURE_LINK"]
+        ),
         "waydroid_running": waydroid_running(),
     }
     print(json.dumps(result, ensure_ascii=False, sort_keys=True))
@@ -179,7 +369,7 @@ def main():
         raise ModeError("must run as root")
     if len(sys.argv) < 2:
         raise ModeError(
-            "usage: waydroid-pen-mode {direct|desktop|status|map|unmap}"
+            "usage: waydroid-pen-mode {direct|desktop|sync|status|map|unmap}"
         )
 
     config = load_config()
@@ -197,6 +387,11 @@ def main():
                 raise ModeError("usage: waydroid-pen-mode desktop")
             result = desktop_mode(config)
             print(f"desktop {result.get('device', '')}".rstrip())
+        elif command == "sync":
+            if len(sys.argv) != 2:
+                raise ModeError("usage: waydroid-pen-mode sync")
+            result = sync_mode(config)
+            print(json.dumps(result, ensure_ascii=False, sort_keys=True))
         elif command == "status":
             if len(sys.argv) != 2:
                 raise ModeError("usage: waydroid-pen-mode status")
@@ -206,7 +401,7 @@ def main():
             print(json.dumps(result, ensure_ascii=False, sort_keys=True))
         else:
             raise ModeError(
-                "usage: waydroid-pen-mode {direct|desktop|status|map|unmap}"
+                "usage: waydroid-pen-mode {direct|desktop|sync|status|map|unmap}"
             )
 
 

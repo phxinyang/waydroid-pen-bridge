@@ -1,0 +1,20 @@
+{
+    "KPackageStructure": "Plasma/Applet",
+    "KPlugin": {
+        "Authors": [
+            {
+                "Name": "xinyang"
+            }
+        ],
+        "Category": "System Information",
+        "Description": "Select automatic, Waydroid, or desktop pen routing",
+        "EnabledByDefault": false,
+        "Icon": "input-tablet",
+        "Id": "org.xinyang.waydroidpenmode",
+        "License": "MIT",
+        "Name": "Waydroid Pen Mode"
+    },
+    "X-Plasma-API-Minimum-Version": "6.0",
+    "X-Plasma-NotificationArea": "true",
+    "X-Plasma-NotificationAreaCategory": "Hardware"
+}

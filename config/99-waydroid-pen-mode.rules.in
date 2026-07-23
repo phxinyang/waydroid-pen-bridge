@@ -1,14 +1,24 @@
 SUBSYSTEM!="input", GOTO="waydroid_pen_mode_end"
 KERNEL!="event*", GOTO="waydroid_pen_mode_end"
-ATTRS{name}!="NVTCapacitivePenM80p", GOTO="waydroid_pen_mode_end"
 
-# The stable proxy remains visible to GNOME for the whole login session.
-ATTRS{phys}=="waydroid-pen-relay", OWNER="@USER_UID@", GROUP="@ANDROID_INPUT_GROUP@", MODE="0660", ENV{ID_INPUT}="1", ENV{ID_INPUT_TABLET}="1", GOTO="waydroid_pen_mode_end"
+# Stable desktop pen proxy.
+ATTRS{name}=="NVTCapacitivePenM80p", ATTRS{id/bustype}=="0003", ATTRS{id/vendor}=="2717", ATTRS{id/product}=="3654", ATTRS{phys}=="waydroid-pen-relay", OWNER="@USER_UID@", GROUP="@ANDROID_INPUT_GROUP@", MODE="0660", ENV{ID_INPUT}="1", ENV{ID_INPUT_TABLET}="1", GOTO="waydroid_pen_mode_end"
 
-# The mapped proxy is mounted into Waydroid and must stay hidden from libinput.
-ATTRS{phys}=="waydroid-pen-android", OWNER="@USER_UID@", GROUP="@ANDROID_INPUT_GROUP@", MODE="0660", SYMLINK+="input/waydroid-android-pen", ENV{LIBINPUT_IGNORE_DEVICE}="1", GOTO="waydroid_pen_mode_end"
+# Stable Android pen proxy.
+ATTRS{name}=="NVTCapacitivePenM80p", ATTRS{id/bustype}=="0003", ATTRS{id/vendor}=="2717", ATTRS{id/product}=="3654", ATTRS{phys}=="waydroid-pen-android", OWNER="@USER_UID@", GROUP="@ANDROID_INPUT_GROUP@", MODE="0660", SYMLINK+="input/waydroid-android-pen", ENV{LIBINPUT_IGNORE_DEVICE}="1", GOTO="waydroid_pen_mode_end"
 
-# The THP-created physical device is consumed by the relay and optionally Android.
-OWNER="@USER_UID@", GROUP="@ANDROID_INPUT_GROUP@", MODE="0660", SYMLINK+="input/waydroid-pen", ENV{LIBINPUT_IGNORE_DEVICE}="1"
+# Driver-created standard pen source (thp phys is input/pen).
+ATTRS{name}=="NVTCapacitivePenM80p", ATTRS{id/bustype}=="0006", ATTRS{id/vendor}=="2717", ATTRS{id/product}=="3654", ATTRS{phys}=="input/pen", OWNER="@USER_UID@", GROUP="@ANDROID_INPUT_GROUP@", MODE="0660", SYMLINK+="input/waydroid-pen", ENV{LIBINPUT_IGNORE_DEVICE}="1", GOTO="waydroid_pen_mode_end"
+# Driver-created Pro pen source.
+ATTRS{name}=="NVTCapacitivePenP81c", ATTRS{id/bustype}=="0006", ATTRS{id/vendor}=="2717", ATTRS{id/product}=="3656", ATTRS{phys}=="input/pen_p81c", OWNER="@USER_UID@", GROUP="@ANDROID_INPUT_GROUP@", MODE="0660", SYMLINK+="input/waydroid-pen-pro", ENV{LIBINPUT_IGNORE_DEVICE}="1", GOTO="waydroid_pen_mode_end"
+
+# Stable desktop gesture proxy. It declares KEY_PROG3/KEY_PROG4 only.
+ATTRS{name}=="Xiaomi Focus Pen Gestures", ATTRS{id/bustype}=="0003", ATTRS{id/vendor}=="2717", ATTRS{id/product}=="3655", ATTRS{phys}=="waydroid-gesture-relay", OWNER="@USER_UID@", GROUP="@ANDROID_INPUT_GROUP@", MODE="0660", ENV{ID_INPUT}="1", ENV{ID_INPUT_KEY}="1", GOTO="waydroid_pen_mode_end"
+
+# Stable Android gesture proxy, mounted into Waydroid at all times.
+ATTRS{name}=="Xiaomi Focus Pen Gestures", ATTRS{id/bustype}=="0003", ATTRS{id/vendor}=="2717", ATTRS{id/product}=="3655", ATTRS{phys}=="waydroid-gesture-android", OWNER="@USER_UID@", GROUP="@ANDROID_INPUT_GROUP@", MODE="0660", SYMLINK+="input/waydroid-android-gestures", ENV{LIBINPUT_IGNORE_DEVICE}="1", GOTO="waydroid_pen_mode_end"
+
+# Optional driver-created Pro gesture source.
+ATTRS{name}=="Xiaomi Focus Pen Gestures", ATTRS{id/bustype}=="0006", ATTRS{id/vendor}=="2717", ATTRS{id/product}=="3655", ATTRS{phys}=="", OWNER="@USER_UID@", GROUP="@ANDROID_INPUT_GROUP@", MODE="0660", SYMLINK+="input/waydroid-pen-gestures", ENV{LIBINPUT_IGNORE_DEVICE}="1"
 
 LABEL="waydroid_pen_mode_end"

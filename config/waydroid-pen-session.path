@@ -1,0 +1,9 @@
+[Unit]
+Description=Watch the Waydroid pen relay instance
+
+[Path]
+PathChanged=/run/waydroid-pen-mode/state.json
+Unit=waydroid-pen-session-reapply.service
+
+[Install]
+WantedBy=default.target
