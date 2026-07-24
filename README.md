@@ -1,5 +1,7 @@
 # Waydroid Pen Mode
 
+English | [简体中文](README.zh-CN.md)
+
 Routes the Xiaomi Pad 6S Pro (`sheng`) pen between the desktop and Waydroid
 without hot-removing a tablet device from the compositor.
 
@@ -48,7 +50,8 @@ Overview temporarily select desktop routing while the policy is automatic.
 - Waydroid 1.6.x
 - Python 3
 - `sudo`, `systemd`, `udevadm`, `visudo` and LXC
-- `xiaomi-sheng-thp.service` with M80p/P81c `2717:3654` pen nodes and the
+- [`xiaomi-sheng-thp.service`](https://github.com/ianchb/xiaomi-sheng-thp) with
+  M80p/P81c `2717:3654` pen nodes and the
   optional `0022:5081` `Xiaomi Focus Pen Pro Gestures` node
 
 ## Install
