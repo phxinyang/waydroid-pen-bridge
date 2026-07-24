@@ -52,27 +52,12 @@ BTN_6 = 0x106
 BTN_7 = 0x107
 BTN_8 = 0x108
 BTN_9 = 0x109
-KEY_PROG1 = 148
-KEY_PROG2 = 149
-KEY_PROG3 = 202
-KEY_PROG4 = 203
-DESKTOP_GESTURE_KEYS = (KEY_PROG3, KEY_PROG4)
-ANDROID_GESTURE_KEYS = (KEY_PROG1, KEY_PROG2, KEY_PROG3, KEY_PROG4)
-PRO_BUTTON_TO_STYLUS = {
-    BTN_6: BTN_STYLUS,
-    BTN_7: BTN_STYLUS2,
-}
-PRO_SLIDE_TO_DESKTOP = {
-    BTN_8: KEY_PROG3,
-    BTN_9: KEY_PROG4,
-}
-PRO_GESTURE_TO_ANDROID = {
-    BTN_6: KEY_PROG1,
-    BTN_7: KEY_PROG2,
-    BTN_8: KEY_PROG3,
-    BTN_9: KEY_PROG4,
-}
-PRO_GESTURE_CODES = tuple(PRO_GESTURE_TO_ANDROID)
+PRO_GESTURE_CODES = (BTN_6, BTN_7, BTN_8, BTN_9)
+# Keep the driver's Linux button codes on both proxy devices. Android's
+# keylayout translates their scan codes to BUTTON_7..BUTTON_10; the relay
+# never assigns application semantics to a Pro gesture.
+DESKTOP_GESTURE_KEYS = PRO_GESTURE_CODES
+ANDROID_GESTURE_KEYS = PRO_GESTURE_CODES
 ABS_X = 0x00
 ABS_Y = 0x01
 ABS_BRAKE = 0x0A
@@ -398,26 +383,25 @@ class VirtualGestureKeyboard:
             written = os.write(self.fd, view)
             view = view[written:]
 
-    def feed(self, data, code_map, stream):
+    def feed(self, data, stream):
         pending = self.pending.setdefault(stream, [])
         for offset in range(0, len(data), INPUT_EVENT.size):
             seconds, microseconds, event_type, code, value = (
                 INPUT_EVENT.unpack_from(data, offset)
             )
-            output_code = code_map.get(code)
-            if event_type == EV_KEY and output_code in self.pressed:
+            if event_type == EV_KEY and code in self.pressed:
                 if value not in (0, 1):
                     continue
                 pressed = value == 1
-                if self.pressed[output_code] == pressed:
+                if self.pressed[code] == pressed:
                     continue
-                self.pressed[output_code] = pressed
+                self.pressed[code] = pressed
                 pending.append(
                     INPUT_EVENT.pack(
                         seconds,
                         microseconds,
                         EV_KEY,
-                        output_code,
+                        code,
                         value,
                     )
                 )
@@ -502,7 +486,6 @@ class AndroidFrameMapper:
             BTN_STYLUS: 0,
             BTN_STYLUS2: 0,
         }
-        self.stylus_buttons_enabled = True
         self.active = False
 
     def set_geometry(self, geometry):
@@ -519,26 +502,6 @@ class AndroidFrameMapper:
             return
         self.release()
         self.geometry = geometry
-
-    def set_stylus_buttons_enabled(self, enabled):
-        enabled = bool(enabled)
-        if enabled == self.stylus_buttons_enabled:
-            return
-        self.release()
-        self.stylus_buttons_enabled = enabled
-
-    def reset_stylus_buttons(self):
-        self.release()
-        self.keys[BTN_STYLUS] = 0
-        self.keys[BTN_STYLUS2] = 0
-        self.events = [
-            event
-            for event in self.events
-            if not (
-                event[2] == EV_KEY
-                and event[3] in (BTN_STYLUS, BTN_STYLUS2)
-            )
-        ]
 
     def reset_source_state(self):
         self.release()
@@ -591,12 +554,6 @@ class AndroidFrameMapper:
                 value = mapped_x
             elif event_type == EV_ABS and code == ABS_Y:
                 value = mapped_y
-            elif (
-                event_type == EV_KEY
-                and code in (BTN_STYLUS, BTN_STYLUS2)
-                and not self.stylus_buttons_enabled
-            ):
-                continue
             mapped_events.append(
                 INPUT_EVENT.pack(
                     seconds, microseconds, event_type, code, value
@@ -628,13 +585,11 @@ class AndroidFrameMapper:
         )
 
     def _snapshot(self, x, y):
-        stylus = self.keys[BTN_STYLUS] if self.stylus_buttons_enabled else 0
-        stylus2 = self.keys[BTN_STYLUS2] if self.stylus_buttons_enabled else 0
         events = [
             make_event(EV_KEY, BTN_TOOL_PEN, self.keys[BTN_TOOL_PEN]),
             make_event(EV_KEY, BTN_TOUCH, self.keys[BTN_TOUCH]),
-            make_event(EV_KEY, BTN_STYLUS, stylus),
-            make_event(EV_KEY, BTN_STYLUS2, stylus2),
+            make_event(EV_KEY, BTN_STYLUS, self.keys[BTN_STYLUS]),
+            make_event(EV_KEY, BTN_STYLUS2, self.keys[BTN_STYLUS2]),
             make_event(EV_ABS, ABS_X, x),
             make_event(EV_ABS, ABS_Y, y),
             make_event(EV_ABS, ABS_BRAKE, self.axes[ABS_BRAKE]),
@@ -660,12 +615,8 @@ class PenRelay:
         self.gesture_device_fd = None
         self.gesture_input_buffer = bytearray()
         self.pro_gesture_state = {code: False for code in PRO_GESTURE_CODES}
-        self.desktop_pro_buttons = {
-            BTN_STYLUS: False,
-            BTN_STYLUS2: False,
-        }
-        self.desktop_pro_button_pending = []
         self.pro_available = False
+        self.waydroid_focused = False
         self.android_pro_active = False
         self.capability_generation = self._next_capability_generation()
         self.instance_id = uuid.uuid4().hex
@@ -721,6 +672,7 @@ class PenRelay:
                 str(self.gesture_device) if self.gesture_device else None
             ),
             "pro_available": self.pro_available,
+            "waydroid_focused": self.waydroid_focused,
             "android_pro_active": self.android_pro_active,
             "capability_generation": self.capability_generation,
             "instance_id": self.instance_id,
@@ -730,82 +682,6 @@ class PenRelay:
 
     def _response(self):
         return {"ok": True, **self._state()}
-
-    def _sync_android_button_policy(self):
-        self.android_mapper.set_stylus_buttons_enabled(
-            not (self.mode == "direct" and self.android_pro_active)
-        )
-
-    def _clear_desktop_pro_buttons(self):
-        for code in self.desktop_pro_buttons:
-            self.desktop_pro_buttons[code] = False
-        self.desktop_pro_button_pending.clear()
-
-    def _set_desktop_pro_button(self, code, pressed):
-        pressed = bool(pressed)
-        if self.desktop_pro_buttons[code] == pressed:
-            return False
-        self.desktop_pro_buttons[code] = pressed
-        self.proxy.write(
-            b"".join(
-                (
-                    make_event(EV_KEY, code, int(pressed)),
-                    make_event(EV_SYN, SYN_REPORT, 0),
-                )
-            )
-        )
-        return True
-
-    def _release_desktop_pro_buttons(self):
-        events = []
-        for code, pressed in self.desktop_pro_buttons.items():
-            if not pressed:
-                continue
-            self.desktop_pro_buttons[code] = False
-            events.append(make_event(EV_KEY, code, 0))
-        self.desktop_pro_button_pending.clear()
-        if events:
-            events.append(make_event(EV_SYN, SYN_REPORT, 0))
-            self.proxy.write(b"".join(events))
-
-    def _feed_desktop_pro_buttons(self, data):
-        for offset in range(0, len(data), INPUT_EVENT.size):
-            seconds, microseconds, event_type, code, value = (
-                INPUT_EVENT.unpack_from(data, offset)
-            )
-            output_code = PRO_BUTTON_TO_STYLUS.get(code)
-            if event_type == EV_KEY and output_code is not None:
-                if value not in (0, 1):
-                    continue
-                pressed = value == 1
-                if self.desktop_pro_buttons[output_code] == pressed:
-                    continue
-                self.desktop_pro_buttons[output_code] = pressed
-                self.desktop_pro_button_pending.append(
-                    INPUT_EVENT.pack(
-                        seconds,
-                        microseconds,
-                        EV_KEY,
-                        output_code,
-                        value,
-                    )
-                )
-            elif (
-                event_type == EV_SYN
-                and code == SYN_REPORT
-                and self.desktop_pro_button_pending
-            ):
-                self.desktop_pro_button_pending.append(
-                    INPUT_EVENT.pack(
-                        seconds,
-                        microseconds,
-                        EV_SYN,
-                        SYN_REPORT,
-                        0,
-                    )
-                )
-                self.proxy.write(b"".join(self.desktop_pro_button_pending))
-                self.desktop_pro_button_pending.clear()
 
     def _update_pro_gesture_state(self, data):
         for offset in range(0, len(data), INPUT_EVENT.size):
@@ -824,33 +700,31 @@ class PenRelay:
             self.pro_gesture_state[code] = False
 
     def _synthesize_desktop_pro_state(self):
-        for source_code, output_code in PRO_BUTTON_TO_STYLUS.items():
-            if self.pro_gesture_state[source_code]:
-                self._set_desktop_pro_button(output_code, True)
-        for source_code, output_code in PRO_SLIDE_TO_DESKTOP.items():
-            if self.pro_gesture_state[source_code]:
-                self.gesture_proxy.set_key(output_code, True)
+        for code in PRO_GESTURE_CODES:
+            if self.pro_gesture_state[code]:
+                self.gesture_proxy.set_key(code, True)
 
     def _synthesize_android_pro_state(self):
-        for source_code, output_code in PRO_GESTURE_TO_ANDROID.items():
-            if self.pro_gesture_state[source_code]:
-                self.android_gesture_proxy.set_key(output_code, True)
+        for code in PRO_GESTURE_CODES:
+            if self.pro_gesture_state[code]:
+                self.android_gesture_proxy.set_key(code, True)
+
+    def _android_pro_should_be_active(self):
+        return self.pro_available and self.waydroid_focused
 
     def _set_android_pro_active(self, active, synthesize_pressed=False):
         active = bool(active)
         if active == self.android_pro_active:
             return False
         if active:
-            if self.mode != "direct" or not self.pro_available:
+            if not self._android_pro_should_be_active():
                 raise RelayError("cannot activate Pro routing in the current state")
             self.android_pro_active = True
-            self._sync_android_button_policy()
             if synthesize_pressed:
                 self._synthesize_android_pro_state()
         else:
             self.android_gesture_proxy.release()
             self.android_pro_active = False
-            self._sync_android_button_policy()
         return True
 
     def _require_capability(self, generation, pro_available):
@@ -865,25 +739,24 @@ class PenRelay:
             return False
         if not available:
             self._set_android_pro_active(False)
-            self._release_desktop_pro_buttons()
             self.gesture_proxy.release()
             self.android_gesture_proxy.release()
             self._reset_pro_gesture_state()
-            self.android_mapper.reset_stylus_buttons()
         self.pro_available = available
         self.capability_generation += 1
-        self._sync_android_button_policy()
         self._write_state()
         return True
 
     def set_desktop_mode(self):
-        if self.mode == "desktop" and not self.android_pro_active:
+        if self.mode == "desktop" and (
+            self.android_pro_active == self._android_pro_should_be_active()
+        ):
             return self._response()
         if self.mode == "direct":
             self.android_mapper.release()
-        self._set_android_pro_active(False)
         self.mode = "desktop"
-        self._sync_android_button_policy()
+        if self.android_pro_active and not self._android_pro_should_be_active():
+            self._set_android_pro_active(False)
         if self.pro_available:
             self._synthesize_desktop_pro_state()
         self._write_state()
@@ -894,21 +767,41 @@ class PenRelay:
         entering_direct = self.mode != "direct"
         if entering_direct:
             self.proxy.release()
-            self._clear_desktop_pro_buttons()
             self.gesture_proxy.release()
             self.mode = "direct"
         self._set_android_pro_active(
-            pro_available, synthesize_pressed=True
+            self._android_pro_should_be_active(), synthesize_pressed=True
         )
-        self._sync_android_button_policy()
         self._write_state()
         return self._response()
 
     def activate_android_pro(self, generation):
         self._require_capability(generation, True)
-        if self.mode != "direct":
-            raise RelayError("cannot activate Pro routing outside direct mode")
+        if not self._android_pro_should_be_active():
+            raise RelayError("cannot activate Pro routing in the current state")
         if self._set_android_pro_active(True, synthesize_pressed=True):
+            self._write_state()
+        return self._response()
+
+    def deactivate_android_pro(self):
+        if self._set_android_pro_active(False):
+            self._write_state()
+        return self._response()
+
+    def set_waydroid_focus(self, focused):
+        focused = bool(focused)
+        focus_changed = focused != self.waydroid_focused
+        self.waydroid_focused = focused
+        if focused and self.pro_available and not self.android_pro_active:
+            self.gesture_proxy.release()
+            routing_changed = self._set_android_pro_active(
+                True, synthesize_pressed=False
+            )
+        elif not focused and self.android_pro_active:
+            routing_changed = self._set_android_pro_active(False)
+        else:
+            routing_changed = False
+        if focus_changed or routing_changed:
             self._write_state()
         return self._response()
 
@@ -919,19 +812,10 @@ class PenRelay:
 
     def forward_gesture(self, data):
         self._update_pro_gesture_state(data)
-        if self.mode == "desktop":
-            self._feed_desktop_pro_buttons(data)
-            self.gesture_proxy.feed(
-                data,
-                PRO_SLIDE_TO_DESKTOP,
-                "gesture",
-            )
-        elif self.android_pro_active:
-            self.android_gesture_proxy.feed(
-                data,
-                PRO_GESTURE_TO_ANDROID,
-                "gesture",
-            )
+        if self.mode == "desktop" and not self.android_pro_active:
+            self.gesture_proxy.feed(data, "gesture")
+        if self.android_pro_active:
+            self.android_gesture_proxy.feed(data, "gesture")
 
     def set_mapping(self, values):
         if values is None:
@@ -970,6 +854,13 @@ class PenRelay:
                     if len(arguments) != 2:
                         raise RelayError("usage: activate-pro GENERATION")
                     response = self.activate_android_pro(int(arguments[1]))
+                elif command == "deactivate-pro":
+                    response = self.deactivate_android_pro()
+                elif command.startswith("focus "):
+                    arguments = command.split()
+                    if len(arguments) != 2 or arguments[1] not in {"0", "1"}:
+                        raise RelayError("usage: focus {0|1}")
+                    response = self.set_waydroid_focus(arguments[1] == "1")
                 else:
                     raise RelayError(f"invalid relay command: {command}")
             except Exception as error:
@@ -987,7 +878,7 @@ class PenRelay:
         self.device = None
         self.input_buffer.clear()
         self.proxy.release()
-        self._clear_desktop_pro_buttons()
+        self._set_android_pro_active(False)
         self.android_mapper.reset_source_state()
         self.gesture_proxy.release()
         self.android_gesture_proxy.release()

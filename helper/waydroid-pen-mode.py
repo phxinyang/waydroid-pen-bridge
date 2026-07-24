@@ -176,25 +176,26 @@ def remove_owned_android_links(config):
             waydroid_shell("unlink", spec["link"], check=False)
 
 
-def sync_android_links(config, pro_available):
+def sync_android_links(config, pen_required, pro_available):
     if not waydroid_running():
         raise ModeError("Waydroid is not running")
 
     specs = android_links(config)
+    required = {
+        spec["capability"]
+        for spec in specs
+        if (spec["capability"] == "pen" and pen_required)
+        or (spec["capability"] == "pro" and pro_available)
+    }
     states = {}
     for spec in specs:
         state, target = inspect_android_link(spec)
-        if state == "foreign":
+        if state == "foreign" and spec["capability"] in required:
             raise ModeError(
                 f"refusing to replace Android link {spec['link']} -> {target}"
             )
         states[spec["capability"]] = state
 
-    required = {
-        spec["capability"]
-        for spec in specs
-        if spec["capability"] == "pen" or pro_available
-    }
     for spec in specs:
         if spec["capability"] not in required:
             continue
@@ -222,11 +223,30 @@ def sync_android_links(config, pro_available):
 
 
 def rollback_to_desktop(config):
+    relay = None
     try:
-        relay_command(config, "desktop")
+        relay = relay_command(config, "desktop")
     except Exception as rollback_error:
         print(f"relay rollback failed: {rollback_error}", file=sys.stderr)
-    remove_owned_android_links(config)
+
+    if relay is not None and waydroid_running():
+        try:
+            reconcile_android_links(config, relay)
+            return
+        except Exception as rollback_error:
+            print(
+                f"desktop link rollback failed: {rollback_error}",
+                file=sys.stderr,
+            )
+
+    try:
+        relay_command(config, "deactivate-pro")
+    except Exception as rollback_error:
+        print(f"relay Pro release failed: {rollback_error}", file=sys.stderr)
+    try:
+        remove_owned_android_links(config)
+    except Exception as rollback_error:
+        print(f"Android link cleanup failed: {rollback_error}", file=sys.stderr)
 
 
 def capability_snapshot(relay):
@@ -246,32 +266,78 @@ def capability_matches(left, right):
     return capability_snapshot(left) == capability_snapshot(right)
 
 
-def prepare_direct_links(config, relay):
+def routing_snapshot(relay):
     generation, pro_available = capability_snapshot(relay)
-    sync_android_links(config, pro_available)
+    mode = relay.get("mode")
+    if mode not in {"desktop", "direct"}:
+        raise ModeError("pen relay returned an invalid routing mode")
+    return mode, generation, pro_available
+
+
+def routing_matches(left, right):
+    return routing_snapshot(left) == routing_snapshot(right)
+
+
+def android_pro_should_be_active(relay):
+    _mode, _generation, pro_available = routing_snapshot(relay)
+    focused = relay.get("waydroid_focused")
+    if not isinstance(focused, bool):
+        raise ModeError("pen relay returned an invalid focus state")
+    return pro_available and focused
+
+
+def android_pro_is_active(relay):
+    active = relay.get("android_pro_active")
+    if not isinstance(active, bool):
+        raise ModeError("pen relay returned an invalid Android Pro state")
+    return active
+
+
+def prepare_android_links(config, relay):
+    mode, generation, pro_available = routing_snapshot(relay)
+    sync_android_links(config, mode == "direct", pro_available)
     current = relay_command(config, "status")
-    if not capability_matches(relay, current):
+    if not routing_matches(relay, current):
         return None, current
     return (generation, pro_available), current
 
 
-def reconcile_direct_links(config, relay):
+def reconcile_android_links(config, relay):
     for _attempt in range(3):
-        if relay.get("mode") != "direct":
-            raise ModeError("pen relay left direct mode during link sync")
-        prepared, current = prepare_direct_links(config, relay)
+        prepared, current = prepare_android_links(config, relay)
         if prepared is None:
             relay = current
             continue
-        generation, pro_available = prepared
-        if pro_available and not current.get("android_pro_active"):
+        generation, _pro_available = prepared
+        if android_pro_should_be_active(current) and not android_pro_is_active(
+            current
+        ):
             try:
                 return relay_command(config, f"activate-pro {generation}")
             except ModeError:
                 relay = relay_command(config, "status")
                 continue
+        if not android_pro_should_be_active(current) and android_pro_is_active(
+            current
+        ):
+            try:
+                return relay_command(config, "deactivate-pro")
+            except ModeError:
+                relay = relay_command(config, "status")
+                continue
         return current
-    raise ModeError("pen capability changed repeatedly during link sync")
+    raise ModeError(
+        "pen capability or routing changed repeatedly during link sync"
+    )
+
+
+def prepare_direct_links(config, relay):
+    generation, pro_available = capability_snapshot(relay)
+    sync_android_links(config, True, pro_available)
+    current = relay_command(config, "status")
+    if not capability_matches(relay, current):
+        return None, current
+    return (generation, pro_available), current
 
 
 def relay_command(config, command):
@@ -295,8 +361,17 @@ def relay_command(config, command):
 
 def desktop_mode(config):
     relay = relay_command(config, "desktop")
-    remove_owned_android_links(config)
-    return relay
+    if not waydroid_running():
+        remove_owned_android_links(config)
+        return relay
+    try:
+        return reconcile_android_links(config, relay)
+    except Exception:
+        try:
+            relay_command(config, "deactivate-pro")
+        except Exception as release_error:
+            print(f"relay Pro release failed: {release_error}", file=sys.stderr)
+        raise
 
 
 def direct_mode(config):
@@ -323,14 +398,40 @@ def direct_mode(config):
 
 def sync_mode(config):
     relay = relay_command(config, "status")
-    if relay.get("mode") != "direct":
-        remove_owned_android_links(config)
-        return relay
+    if not waydroid_running():
+        # A stopped container cannot be inspected or relinked, but the relay
+        # must stop writing Pro events into a stale Android channel.  The
+        # container start/stop drop-in runs sync again when inspection is
+        # possible.
+        return relay_command(config, "deactivate-pro")
     try:
-        return reconcile_direct_links(config, relay)
+        return reconcile_android_links(config, relay)
     except Exception:
-        rollback_to_desktop(config)
+        if relay.get("mode") == "direct":
+            rollback_to_desktop(config)
+        else:
+            try:
+                relay_command(config, "deactivate-pro")
+            except Exception as release_error:
+                print(
+                    f"relay Pro release failed: {release_error}",
+                    file=sys.stderr,
+                )
         raise
+
+
+def focus_mode(config, focused):
+    focused = bool(focused)
+    relay = relay_command(config, "status")
+    if focused:
+        if not waydroid_running():
+            raise ModeError("Waydroid is not running")
+        # Create event5 before enabling the relay's Android side channel.
+        relay = reconcile_android_links(config, relay)
+    relay = relay_command(config, f"focus {int(focused)}")
+    if focused:
+        relay = reconcile_android_links(config, relay)
+    return relay
 
 
 def status(config):
@@ -375,7 +476,8 @@ def main():
         raise ModeError("must run as root")
     if len(sys.argv) < 2:
         raise ModeError(
-            "usage: waydroid-pen-mode {direct|desktop|sync|status|map|unmap}"
+            "usage: waydroid-pen-mode "
+            "{direct|desktop|sync|focus|status|map|unmap}"
         )
 
     config = load_config()
@@ -398,6 +500,11 @@ def main():
                 raise ModeError("usage: waydroid-pen-mode sync")
             result = sync_mode(config)
             print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+        elif command == "focus":
+            if len(sys.argv) != 3 or sys.argv[2] not in {"0", "1"}:
+                raise ModeError("usage: waydroid-pen-mode focus {0|1}")
+            result = focus_mode(config, sys.argv[2] == "1")
+            print(json.dumps(result, ensure_ascii=False, sort_keys=True))
         elif command == "status":
             if len(sys.argv) != 2:
                 raise ModeError("usage: waydroid-pen-mode status")
@@ -407,7 +514,8 @@ def main():
             print(json.dumps(result, ensure_ascii=False, sort_keys=True))
         else:
             raise ModeError(
-                "usage: waydroid-pen-mode {direct|desktop|sync|status|map|unmap}"
+                "usage: waydroid-pen-mode "
+                "{direct|desktop|sync|focus|status|map|unmap}"
             )
 
 

@@ -12,7 +12,7 @@ ATTRS{name}=="NVTCapacitivePenM80p", ATTRS{id/bustype}=="0006", ATTRS{id/vendor}
 # Driver-created Pro pen source.
 ATTRS{name}=="NVTCapacitivePenP81c", ATTRS{id/bustype}=="0006", ATTRS{id/vendor}=="2717", ATTRS{id/product}=="3654", ATTRS{phys}=="input/pen_p81c", OWNER="@USER_UID@", GROUP="@ANDROID_INPUT_GROUP@", MODE="0660", SYMLINK+="input/waydroid-pen-pro", ENV{LIBINPUT_IGNORE_DEVICE}="1", GOTO="waydroid_pen_mode_end"
 
-# Stable desktop gesture proxy. It declares KEY_PROG3/KEY_PROG4 only.
+# Stable desktop gesture proxy. It preserves BTN_6/BTN_7/BTN_8/BTN_9.
 ATTRS{name}=="Xiaomi Focus Pen Pro Gestures", ATTRS{id/bustype}=="0003", ATTRS{id/vendor}=="2717", ATTRS{id/product}=="3655", ATTRS{phys}=="waydroid-gesture-relay", OWNER="@USER_UID@", GROUP="@ANDROID_INPUT_GROUP@", MODE="0660", ENV{ID_INPUT}="1", ENV{ID_INPUT_KEY}="1", GOTO="waydroid_pen_mode_end"
 
 # Stable Android gesture proxy, mounted into Waydroid at all times.

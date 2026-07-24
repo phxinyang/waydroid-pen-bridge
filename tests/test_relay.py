@@ -120,12 +120,8 @@ class RelayTests(unittest.TestCase):
         relay.pro_gesture_state = {
             code: False for code in MODULE.PRO_GESTURE_CODES
         }
-        relay.desktop_pro_buttons = {
-            MODULE.BTN_STYLUS: False,
-            MODULE.BTN_STYLUS2: False,
-        }
-        relay.desktop_pro_button_pending = []
         relay.pro_available = False
+        relay.waydroid_focused = False
         relay.android_pro_active = False
         relay.capability_generation = 1
         relay.instance_id = "test-relay-instance"
@@ -324,7 +320,7 @@ class RelayTests(unittest.TestCase):
         self.assertIn((MODULE.EV_KEY, MODULE.BTN_STYLUS, 1), pen_values)
         self.assertEqual(relay.android_gesture_proxy.writes, [])
 
-    def test_pro_desktop_keeps_standard_buttons_and_slide_codes(self):
+    def test_pro_desktop_keeps_raw_buttons_off_android_without_focus(self):
         with tempfile.TemporaryDirectory() as directory:
             relay = self.make_relay(Path(directory) / "state.json")
             relay._set_pro_available(True)
@@ -336,40 +332,59 @@ class RelayTests(unittest.TestCase):
             ):
                 relay.forward_gesture(gesture_frame(code, 1))
 
-        self.assertEqual(
-            event_values(relay.proxy.writes),
-            [
-                (MODULE.EV_KEY, MODULE.BTN_STYLUS, 1),
-                (MODULE.EV_KEY, MODULE.BTN_STYLUS2, 1),
-            ],
-        )
+        self.assertEqual(relay.proxy.writes, [])
         self.assertEqual(
             event_values(relay.gesture_proxy.writes),
             [
-                (MODULE.EV_KEY, MODULE.KEY_PROG3, 1),
-                (MODULE.EV_KEY, MODULE.KEY_PROG4, 1),
+                (MODULE.EV_KEY, MODULE.BTN_6, 1),
+                (MODULE.EV_KEY, MODULE.BTN_7, 1),
+                (MODULE.EV_KEY, MODULE.BTN_8, 1),
+                (MODULE.EV_KEY, MODULE.BTN_9, 1),
             ],
         )
         self.assertEqual(relay.android_gesture_proxy.writes, [])
 
-    def test_pro_direct_filters_pen_buttons_and_emits_194_195_sources_once(self):
+    def test_pro_desktop_focus_routes_raw_buttons_only_to_android(self):
+        with tempfile.TemporaryDirectory() as directory:
+            relay = self.make_relay(Path(directory) / "state.json")
+            relay._set_pro_available(True)
+            relay.set_waydroid_focus(True)
+            for code in MODULE.PRO_GESTURE_CODES:
+                relay.forward_gesture(gesture_frame(code, 1))
+
+        expected = [
+            (MODULE.EV_KEY, code, 1) for code in MODULE.PRO_GESTURE_CODES
+        ]
+        self.assertEqual(relay.gesture_proxy.writes, [])
+        self.assertEqual(
+            event_values(relay.android_gesture_proxy.writes), expected
+        )
+        self.assertTrue(relay.android_pro_active)
+
+    def test_pro_direct_preserves_pen_buttons_and_forwards_raw_gestures_once(self):
         with tempfile.TemporaryDirectory() as directory:
             relay = self.make_relay(Path(directory) / "state.json")
             relay._set_pro_available(True)
             relay.set_direct_mode(relay.capability_generation, True)
-            relay.forward(pen_frame())
+            relay.set_waydroid_focus(True)
+            relay.forward(
+                pen_frame(
+                    (MODULE.BTN_STYLUS, 1),
+                    (MODULE.BTN_STYLUS2, 1),
+                )
+            )
             relay.forward_gesture(gesture_frame(MODULE.BTN_6, 1))
             relay.forward_gesture(gesture_frame(MODULE.BTN_7, 1))
             relay.forward_gesture(gesture_frame(MODULE.BTN_6, 1))
 
         pen_values = event_values(relay.android_proxy.writes)
-        self.assertNotIn((MODULE.EV_KEY, MODULE.BTN_STYLUS, 1), pen_values)
-        self.assertNotIn((MODULE.EV_KEY, MODULE.BTN_STYLUS2, 1), pen_values)
+        self.assertIn((MODULE.EV_KEY, MODULE.BTN_STYLUS, 1), pen_values)
+        self.assertIn((MODULE.EV_KEY, MODULE.BTN_STYLUS2, 1), pen_values)
         self.assertEqual(
             event_values(relay.android_gesture_proxy.writes),
             [
-                (MODULE.EV_KEY, MODULE.KEY_PROG1, 1),
-                (MODULE.EV_KEY, MODULE.KEY_PROG2, 1),
+                (MODULE.EV_KEY, MODULE.BTN_6, 1),
+                (MODULE.EV_KEY, MODULE.BTN_7, 1),
             ],
         )
 
@@ -377,6 +392,7 @@ class RelayTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             relay = self.make_relay(Path(directory) / "state.json")
             relay.set_direct_mode(relay.capability_generation, False)
+            relay.set_waydroid_focus(True)
             relay._set_pro_available(True)
             relay.forward_gesture(gesture_frame(MODULE.BTN_6, 1))
 
@@ -390,16 +406,17 @@ class RelayTests(unittest.TestCase):
         self.assertEqual(
             event_values(relay.android_gesture_proxy.writes),
             [
-                (MODULE.EV_KEY, MODULE.KEY_PROG1, 1),
-                (MODULE.EV_KEY, MODULE.KEY_PROG1, 0),
+                (MODULE.EV_KEY, MODULE.BTN_6, 1),
+                (MODULE.EV_KEY, MODULE.BTN_6, 0),
             ],
         )
 
-    def test_pro_slides_remain_key_prog3_4_without_legacy_codes(self):
+    def test_pro_gestures_remain_raw_without_legacy_codes(self):
         with tempfile.TemporaryDirectory() as directory:
             relay = self.make_relay(Path(directory) / "state.json")
             relay._set_pro_available(True)
             relay.set_direct_mode(relay.capability_generation, True)
+            relay.set_waydroid_focus(True)
             for code in (MODULE.BTN_8, MODULE.BTN_9):
                 relay.forward_gesture(gesture_frame(code, 1))
                 relay.forward_gesture(gesture_frame(code, 0))
@@ -408,34 +425,107 @@ class RelayTests(unittest.TestCase):
         self.assertEqual(
             [value[1] for value in values],
             [
-                MODULE.KEY_PROG3,
-                MODULE.KEY_PROG3,
-                MODULE.KEY_PROG4,
-                MODULE.KEY_PROG4,
+                MODULE.BTN_8,
+                MODULE.BTN_8,
+                MODULE.BTN_9,
+                MODULE.BTN_9,
             ],
         )
-        self.assertNotIn(73, [value[1] for value in values])
-        self.assertNotIn(81, [value[1] for value in values])
+        for legacy_code in (73, 81, 148, 149, 202, 203):
+            self.assertNotIn(legacy_code, [value[1] for value in values])
 
-    def test_mode_switch_releases_all_android_gesture_keys(self):
+    def test_direct_to_desktop_keeps_focused_android_gesture_state(self):
         with tempfile.TemporaryDirectory() as directory:
             relay = self.make_relay(Path(directory) / "state.json")
             relay._set_pro_available(True)
             relay.set_direct_mode(relay.capability_generation, True)
+            relay.set_waydroid_focus(True)
             for code in MODULE.ANDROID_GESTURE_KEYS:
                 relay.android_gesture_proxy.set_key(code, True)
             write_count = len(relay.android_gesture_proxy.writes)
             relay.set_desktop_mode()
 
-        release_values = event_values(
-            relay.android_gesture_proxy.writes[write_count:]
+        self.assertEqual(relay.android_gesture_proxy.writes[write_count:], [])
+        self.assertTrue(relay.android_pro_active)
+
+    def test_desktop_focus_loss_releases_all_android_gesture_keys(self):
+        with tempfile.TemporaryDirectory() as directory:
+            relay = self.make_relay(Path(directory) / "state.json")
+            relay._set_pro_available(True)
+            relay.set_waydroid_focus(True)
+            relay.forward_gesture(gesture_frame(MODULE.BTN_6, 1))
+            relay.forward_gesture(gesture_frame(MODULE.BTN_9, 1))
+            write_count = len(relay.android_gesture_proxy.writes)
+            relay.set_waydroid_focus(False)
+
+        self.assertFalse(relay.android_pro_active)
+        self.assertEqual(
+            set(event_values(relay.android_gesture_proxy.writes[write_count:])),
+            {
+                (MODULE.EV_KEY, MODULE.BTN_6, 0),
+                (MODULE.EV_KEY, MODULE.BTN_9, 0),
+            },
+        )
+
+    def test_direct_focus_loss_also_releases_android_gesture_keys(self):
+        with tempfile.TemporaryDirectory() as directory:
+            relay = self.make_relay(Path(directory) / "state.json")
+            relay._set_pro_available(True)
+            relay.set_direct_mode(relay.capability_generation, True)
+            relay.set_waydroid_focus(True)
+            relay.forward_gesture(gesture_frame(MODULE.BTN_7, 1))
+            write_count = len(relay.android_gesture_proxy.writes)
+            relay.set_waydroid_focus(False)
+
+        self.assertFalse(relay.android_pro_active)
+        self.assertEqual(
+            event_values(relay.android_gesture_proxy.writes[write_count:]),
+            [(MODULE.EV_KEY, MODULE.BTN_7, 0)],
+        )
+
+    def test_desktop_focus_gain_does_not_replay_held_button(self):
+        with tempfile.TemporaryDirectory() as directory:
+            relay = self.make_relay(Path(directory) / "state.json")
+            relay._set_pro_available(True)
+            relay.forward_gesture(gesture_frame(MODULE.BTN_6, 1))
+            relay.set_waydroid_focus(True)
+            relay.forward_gesture(gesture_frame(MODULE.BTN_6, 0))
+
+        self.assertEqual(relay.android_gesture_proxy.writes, [])
+        self.assertEqual(
+            event_values(relay.gesture_proxy.writes),
+            [
+                (MODULE.EV_KEY, MODULE.BTN_6, 1),
+                (MODULE.EV_KEY, MODULE.BTN_6, 0),
+            ],
+        )
+
+    def test_pro_button_destination_follows_focus_without_duplication(self):
+        with tempfile.TemporaryDirectory() as directory:
+            relay = self.make_relay(Path(directory) / "state.json")
+            relay._set_pro_available(True)
+            relay.forward_gesture(gesture_frame(MODULE.BTN_6, 1))
+            relay.forward_gesture(gesture_frame(MODULE.BTN_6, 0))
+            relay.set_waydroid_focus(True)
+            relay.forward_gesture(gesture_frame(MODULE.BTN_6, 1))
+            relay.forward_gesture(gesture_frame(MODULE.BTN_6, 0))
+            relay.set_waydroid_focus(False)
+            relay.forward_gesture(gesture_frame(MODULE.BTN_6, 1))
+            relay.forward_gesture(gesture_frame(MODULE.BTN_6, 0))
+
+        self.assertEqual(
+            event_values(relay.gesture_proxy.writes),
+            [
+                (MODULE.EV_KEY, MODULE.BTN_6, 1),
+                (MODULE.EV_KEY, MODULE.BTN_6, 0),
+            ] * 2,
         )
         self.assertEqual(
-            set(release_values),
-            {
-                (MODULE.EV_KEY, code, 0)
-                for code in MODULE.ANDROID_GESTURE_KEYS
-            },
+            event_values(relay.android_gesture_proxy.writes),
+            [
+                (MODULE.EV_KEY, MODULE.BTN_6, 1),
+                (MODULE.EV_KEY, MODULE.BTN_6, 0),
+            ],
         )
 
     def test_pro_disconnect_releases_keys_and_increments_generation(self):
@@ -443,6 +533,7 @@ class RelayTests(unittest.TestCase):
             relay = self.make_relay(Path(directory) / "state.json")
             relay._set_pro_available(True)
             relay.set_direct_mode(relay.capability_generation, True)
+            relay.set_waydroid_focus(True)
             generation = relay.capability_generation
             relay.forward_gesture(gesture_frame(MODULE.BTN_6, 1))
             relay.forward_gesture(gesture_frame(MODULE.BTN_9, 1))
@@ -460,8 +551,8 @@ class RelayTests(unittest.TestCase):
         self.assertEqual(
             set(event_values(relay.android_gesture_proxy.writes[write_count:])),
             {
-                (MODULE.EV_KEY, MODULE.KEY_PROG1, 0),
-                (MODULE.EV_KEY, MODULE.KEY_PROG4, 0),
+                (MODULE.EV_KEY, MODULE.BTN_6, 0),
+                (MODULE.EV_KEY, MODULE.BTN_9, 0),
             },
         )
 
@@ -470,32 +561,31 @@ class RelayTests(unittest.TestCase):
         keyboard.feed(
             b"".join(
                 (
-                    gesture_frame(MODULE.KEY_PROG1, 1),
-                    gesture_frame(MODULE.KEY_PROG1, 2),
-                    gesture_frame(MODULE.KEY_PROG1, 1),
-                    gesture_frame(MODULE.KEY_PROG1, 0),
+                    gesture_frame(MODULE.BTN_6, 1),
+                    gesture_frame(MODULE.BTN_6, 2),
+                    gesture_frame(MODULE.BTN_6, 1),
+                    gesture_frame(MODULE.BTN_6, 0),
                 )
             ),
-            {MODULE.KEY_PROG1: MODULE.KEY_PROG1},
             "test",
         )
         self.assertEqual(
             event_values(keyboard.writes),
             [
-                (MODULE.EV_KEY, MODULE.KEY_PROG1, 1),
-                (MODULE.EV_KEY, MODULE.KEY_PROG1, 0),
+                (MODULE.EV_KEY, MODULE.BTN_6, 1),
+                (MODULE.EV_KEY, MODULE.BTN_6, 0),
             ],
         )
 
     def test_missing_release_is_repaired_on_keyboard_release(self):
         keyboard = make_keyboard(MODULE.ANDROID_GESTURE_KEYS)
-        keyboard.set_key(MODULE.KEY_PROG2, True)
+        keyboard.set_key(MODULE.BTN_7, True)
         keyboard.release()
         self.assertEqual(
             event_values(keyboard.writes),
             [
-                (MODULE.EV_KEY, MODULE.KEY_PROG2, 1),
-                (MODULE.EV_KEY, MODULE.KEY_PROG2, 0),
+                (MODULE.EV_KEY, MODULE.BTN_7, 1),
+                (MODULE.EV_KEY, MODULE.BTN_7, 0),
             ],
         )
 
@@ -504,13 +594,14 @@ class RelayTests(unittest.TestCase):
             relay = self.make_relay(Path(directory) / "state.json")
             relay._set_pro_available(True)
             relay.set_direct_mode(relay.capability_generation, True)
+            relay.set_waydroid_focus(True)
             relay.forward_gesture(gesture_frame(MODULE.BTN_6, 1))
             write_count = len(relay.android_gesture_proxy.writes)
             relay._close_device()
 
         self.assertEqual(
             event_values(relay.android_gesture_proxy.writes[write_count:]),
-            [(MODULE.EV_KEY, MODULE.KEY_PROG1, 0)],
+            [(MODULE.EV_KEY, MODULE.BTN_6, 0)],
         )
         self.assertIsNone(relay.android_mapper.axes[MODULE.ABS_X])
         self.assertFalse(any(relay.pro_gesture_state.values()))
@@ -518,7 +609,7 @@ class RelayTests(unittest.TestCase):
     def test_service_exit_closes_keyboard_after_releasing_pressed_keys(self):
         keyboard = make_keyboard(MODULE.ANDROID_GESTURE_KEYS)
         keyboard.fd = 17
-        keyboard.set_key(MODULE.KEY_PROG3, True)
+        keyboard.set_key(MODULE.BTN_8, True)
         with (
             mock.patch.object(MODULE.fcntl, "ioctl"),
             mock.patch.object(MODULE.os, "close") as close,
@@ -526,7 +617,7 @@ class RelayTests(unittest.TestCase):
             keyboard.close()
         self.assertEqual(
             event_values(keyboard.writes)[-1],
-            (MODULE.EV_KEY, MODULE.KEY_PROG3, 0),
+            (MODULE.EV_KEY, MODULE.BTN_8, 0),
         )
         close.assert_called_once_with(17)
 
@@ -541,6 +632,7 @@ class RelayTests(unittest.TestCase):
         self.assertEqual(mode, 0o644)
         self.assertEqual(directory_mode, 0o755)
         self.assertIn("pro_available", state)
+        self.assertIn("waydroid_focused", state)
         self.assertIn("capability_generation", state)
         self.assertIn("gesture_device", state)
         self.assertEqual(state["instance_id"], "test-relay-instance")

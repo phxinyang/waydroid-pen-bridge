@@ -104,6 +104,7 @@ sudoers_tmp=$(mktemp)
     printf '%s ALL=(root) NOPASSWD: %s direct\n' "$INSTALL_USER" "$HELPER"
     printf '%s ALL=(root) NOPASSWD: %s desktop\n' "$INSTALL_USER" "$HELPER"
     printf '%s ALL=(root) NOPASSWD: %s sync\n' "$INSTALL_USER" "$HELPER"
+    printf '%s ALL=(root) NOPASSWD: %s focus *\n' "$INSTALL_USER" "$HELPER"
     printf '%s ALL=(root) NOPASSWD: %s status\n' "$INSTALL_USER" "$HELPER"
     printf '%s ALL=(root) NOPASSWD: %s map *\n' "$INSTALL_USER" "$HELPER"
     printf '%s ALL=(root) NOPASSWD: %s unmap\n' "$INSTALL_USER" "$HELPER"

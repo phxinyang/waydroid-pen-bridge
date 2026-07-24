@@ -91,6 +91,7 @@ class SessionTests(unittest.TestCase):
                     ]
                 ),
                 mock.call(["direct"]),
+                mock.call(["focus", "1"]),
             ],
         )
 
@@ -99,7 +100,20 @@ class SessionTests(unittest.TestCase):
         with mock.patch.object(MODULE, "root_command") as root:
             mode = MODULE.apply_context("auto", context)
         self.assertEqual(mode, "desktop")
-        root.assert_called_once_with(["desktop"])
+        self.assertEqual(
+            root.call_args_list,
+            [mock.call(["focus", "0"]), mock.call(["desktop"])],
+        )
+
+    def test_desktop_policy_keeps_pen_on_desktop_and_enables_focused_buttons(self):
+        context = MODULE.make_context("kde", 3, True, False, None)
+        with mock.patch.object(MODULE, "root_command") as root:
+            mode = MODULE.apply_context("desktop", context)
+        self.assertEqual(mode, "desktop")
+        self.assertEqual(
+            root.call_args_list,
+            [mock.call(["desktop"]), mock.call(["focus", "1"])],
+        )
 
     def test_reconcile_persists_context_and_result(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -119,7 +133,10 @@ class SessionTests(unittest.TestCase):
                     "query_root_status",
                     return_value={
                         "mode": "direct",
-                        "relay": {"instance_id": "relay-1"},
+                        "relay": {
+                            "instance_id": "relay-1",
+                            "waydroid_focused": True,
+                        },
                     },
                 ),
             ):
@@ -161,10 +178,34 @@ class SessionTests(unittest.TestCase):
                 "kde_1700000002000_1", 4, True, False, None
             )
             statuses = [
-                {"mode": "desktop", "relay": {"instance_id": "relay-old"}},
-                {"mode": "desktop", "relay": {"instance_id": "relay-new"}},
-                {"mode": "desktop", "relay": {"instance_id": "relay-new"}},
-                {"mode": "direct", "relay": {"instance_id": "relay-new"}},
+                {
+                    "mode": "desktop",
+                    "relay": {
+                        "instance_id": "relay-old",
+                        "waydroid_focused": False,
+                    },
+                },
+                {
+                    "mode": "desktop",
+                    "relay": {
+                        "instance_id": "relay-new",
+                        "waydroid_focused": False,
+                    },
+                },
+                {
+                    "mode": "desktop",
+                    "relay": {
+                        "instance_id": "relay-new",
+                        "waydroid_focused": False,
+                    },
+                },
+                {
+                    "mode": "direct",
+                    "relay": {
+                        "instance_id": "relay-new",
+                        "waydroid_focused": True,
+                    },
+                },
             ]
             with (
                 mock.patch.object(

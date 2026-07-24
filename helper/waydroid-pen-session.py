@@ -249,6 +249,10 @@ def desired_mode(policy, context):
     return "direct" if context["waydroid_focused"] else "desktop"
 
 
+def desired_android_focus(context):
+    return bool(context["waydroid_focused"] and not context["overview"])
+
+
 def root_command(arguments, *, check=True):
     result = subprocess.run(
         ["/usr/bin/sudo", "-n", ROOT_HELPER, *arguments],
@@ -282,8 +286,17 @@ def relay_instance(root_status):
     return instance
 
 
+def relay_waydroid_focused(root_status):
+    relay = root_status.get("relay")
+    focused = relay.get("waydroid_focused") if isinstance(relay, dict) else None
+    return focused if isinstance(focused, bool) else None
+
+
 def apply_context(policy, context):
     mode = desired_mode(policy, context)
+    focused = desired_android_focus(context)
+    if not focused:
+        root_command(["focus", "0"])
     if mode == "direct":
         mapping = context.get("mapping")
         if mapping is None:
@@ -295,11 +308,14 @@ def apply_context(policy, context):
         root_command(["direct"])
     else:
         root_command(["desktop"])
+    if focused:
+        root_command(["focus", "1"])
     return mode
 
 
 def apply_verified_context(policy, context):
     desired = desired_mode(policy, context)
+    focused = desired_android_focus(context)
     for _attempt in range(3):
         before = query_root_status()
         before_instance = relay_instance(before)
@@ -310,6 +326,7 @@ def apply_verified_context(policy, context):
             before_instance == after_instance
             and applied_mode == desired
             and after.get("mode") == desired
+            and relay_waydroid_focused(after) == focused
         ):
             return applied_mode, after_instance
     raise SessionError("pen relay changed repeatedly while applying context")
@@ -344,7 +361,11 @@ def reapply_saved(paths, policy, context, state):
         return state
 
     desired = desired_mode(policy, context)
-    if root_status.get("mode") == desired:
+    focused = desired_android_focus(context)
+    if (
+        root_status.get("mode") == desired
+        and relay_waydroid_focused(root_status) == focused
+    ):
         state.update(
             {
                 "policy": policy,
