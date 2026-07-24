@@ -102,6 +102,23 @@ class SwitchSafetyTests(unittest.TestCase):
         self.assertNotIn("/usr/bin/waydroid", command)
         self.assertEqual(command[-2:], ["unlink", "/dev/input/event5"])
 
+    def test_frozen_container_is_thawed_only_for_android_command(self):
+        calls = []
+
+        def fake_run(command, **_kwargs):
+            calls.append(command)
+            if command[0] == MODULE.LXC_INFO:
+                return result(stdout="FROZEN\n")
+            return result()
+
+        with mock.patch.object(MODULE, "run", side_effect=fake_run):
+            MODULE.waydroid_shell("readlink", "/dev/input/event4")
+
+        self.assertEqual(calls[0][0], MODULE.LXC_INFO)
+        self.assertEqual(calls[1][0], MODULE.LXC_UNFREEZE)
+        self.assertEqual(calls[2][0], "/usr/bin/lxc-attach")
+        self.assertEqual(calls[3][0], MODULE.LXC_FREEZE)
+
     def test_android_path_probe_ignores_waydroid_shell_exit_status(self):
         with (
             mock.patch.object(MODULE, "waydroid_running", return_value=True),
@@ -452,8 +469,11 @@ class SwitchSafetyTests(unittest.TestCase):
         self.assertIn("Vendor_2717_Product_3655.kcm", uninstall)
         self.assertIn('ATTRS{id/bustype}=="0006"', rules)
         self.assertIn('ATTRS{id/vendor}=="2717"', rules)
-        self.assertIn('ATTRS{id/product}=="3655"', rules)
+        self.assertIn('ATTRS{id/product}=="3654"', rules)
+        self.assertIn('ATTRS{id/vendor}=="0022"', rules)
+        self.assertIn('ATTRS{id/product}=="5081"', rules)
         self.assertIn('ATTRS{phys}=="waydroid-gesture-android"', rules)
+        self.assertIn("Xiaomi Focus Pen Pro Gestures", rules)
         self.assertIn("waydroid-android-gestures", service)
         self.assertNotIn("waydroid-pen-gestures", service)
         self.assertIn("waydroid-pen-session", extension)

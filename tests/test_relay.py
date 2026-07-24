@@ -108,7 +108,8 @@ def create_sysfs_event(
 class RelayTests(unittest.TestCase):
     def make_relay(self, state_path):
         relay = MODULE.PenRelay.__new__(MODULE.PenRelay)
-        relay.config = {"STATE_PATH": str(state_path)}
+        relay.config = dict(MODULE.DEFAULTS)
+        relay.config["STATE_PATH"] = str(state_path)
         relay.mode = "desktop"
         relay.device = Path("/dev/input/event4")
         relay.device_fd = None
@@ -116,6 +117,14 @@ class RelayTests(unittest.TestCase):
         relay.gesture_device = None
         relay.gesture_device_fd = None
         relay.gesture_input_buffer = bytearray()
+        relay.pro_gesture_state = {
+            code: False for code in MODULE.PRO_GESTURE_CODES
+        }
+        relay.desktop_pro_buttons = {
+            MODULE.BTN_STYLUS: False,
+            MODULE.BTN_STYLUS2: False,
+        }
+        relay.desktop_pro_button_pending = []
         relay.pro_available = False
         relay.android_pro_active = False
         relay.capability_generation = 1
@@ -151,11 +160,12 @@ class RelayTests(unittest.TestCase):
                 bustype=MODULE.BUS_VIRTUAL,
                 vendor=MODULE.VENDOR_ID,
                 product=MODULE.PRODUCT_ID,
+                phys="input/pen",
             )
             node = MODULE.find_source_event(
                 "NVTCapacitivePenM80p",
                 MODULE.PRODUCT_ID,
-                "",
+                "input/pen",
                 {"waydroid-pen-relay", "waydroid-pen-android"},
                 root,
                 dev,
@@ -169,28 +179,132 @@ class RelayTests(unittest.TestCase):
                 create_sysfs_event(
                     root,
                     event_name,
-                    name="Xiaomi Focus Pen Gestures",
+                    name="Xiaomi Focus Pen Pro Gestures",
                     bustype=MODULE.BUS_VIRTUAL,
-                    vendor=MODULE.VENDOR_ID,
-                    product=MODULE.GESTURE_PRODUCT_ID,
+                    vendor=MODULE.PRO_GESTURE_VENDOR_ID,
+                    product=MODULE.PRO_GESTURE_PRODUCT_ID,
+                    phys="input/pen_p81c/gestures",
                 )
             with self.assertRaisesRegex(MODULE.RelayError, "ambiguous"):
                 MODULE.find_source_event(
-                    "Xiaomi Focus Pen Gestures",
-                    MODULE.GESTURE_PRODUCT_ID,
-                    "",
+                    "Xiaomi Focus Pen Pro Gestures",
+                    MODULE.PRO_GESTURE_PRODUCT_ID,
+                    "input/pen_p81c/gestures",
                     set(),
                     root,
                     Path(directory) / "dev",
+                    vendor_id=MODULE.PRO_GESTURE_VENDOR_ID,
                 )
+
+    def test_parallel_pen_nodes_select_model_from_gesture_capability(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "sys"
+            dev = Path(directory) / "dev"
+            create_sysfs_event(
+                root,
+                "event4",
+                name="NVTCapacitivePenM80p",
+                bustype=MODULE.BUS_VIRTUAL,
+                vendor=MODULE.VENDOR_ID,
+                product=MODULE.PRODUCT_ID,
+                phys="input/pen",
+            )
+            create_sysfs_event(
+                root,
+                "event5",
+                name="NVTCapacitivePenP81c",
+                bustype=MODULE.BUS_VIRTUAL,
+                vendor=MODULE.VENDOR_ID,
+                product=MODULE.PRODUCT_ID,
+                phys="input/pen_p81c",
+            )
+            config = dict(MODULE.DEFAULTS)
+            ordinary = MODULE.find_pen_source(config, False, root, dev)
+            pro = MODULE.find_pen_source(config, True, root, dev)
+
+        self.assertEqual(ordinary, dev / "event4")
+        self.assertEqual(pro, dev / "event5")
+
+    def test_reconcile_switches_pen_source_with_gesture_lifecycle(self):
+        with tempfile.TemporaryDirectory() as directory:
+            relay = self.make_relay(Path(directory) / "state.json")
+            ordinary = Path("/dev/input/event4")
+            pro = Path("/dev/input/event5")
+            gestures = Path("/dev/input/event13")
+            relay.device = ordinary
+
+            def close_gesture():
+                relay.gesture_device = None
+                relay.pro_available = False
+
+            def open_gesture(node):
+                relay.gesture_device = node
+                relay.pro_available = True
+
+            def close_pen():
+                relay.device = None
+
+            def open_pen(node):
+                relay.device = node
+
+            with (
+                mock.patch.object(
+                    MODULE, "find_gesture_source", return_value=gestures
+                ),
+                mock.patch.object(
+                    MODULE,
+                    "find_pen_source",
+                    side_effect=lambda _config, available: (
+                        pro if available else ordinary
+                    ),
+                ),
+                mock.patch.object(
+                    relay, "_close_gesture_device", side_effect=close_gesture
+                ),
+                mock.patch.object(
+                    relay, "_open_gesture_device", side_effect=open_gesture
+                ),
+                mock.patch.object(
+                    relay, "_close_device", side_effect=close_pen
+                ),
+                mock.patch.object(relay, "_open_device", side_effect=open_pen),
+            ):
+                relay._reconcile_sources()
+
+            self.assertTrue(relay.pro_available)
+            self.assertEqual(relay.device, pro)
+
+            with (
+                mock.patch.object(
+                    MODULE, "find_gesture_source", return_value=None
+                ),
+                mock.patch.object(
+                    MODULE,
+                    "find_pen_source",
+                    side_effect=lambda _config, available: (
+                        pro if available else ordinary
+                    ),
+                ),
+                mock.patch.object(
+                    relay, "_close_gesture_device", side_effect=close_gesture
+                ),
+                mock.patch.object(
+                    relay, "_close_device", side_effect=close_pen
+                ),
+                mock.patch.object(relay, "_open_device", side_effect=open_pen),
+            ):
+                relay._reconcile_sources()
+
+        self.assertFalse(relay.pro_available)
+        self.assertEqual(relay.device, ordinary)
 
     def test_missing_optional_gesture_source_keeps_ordinary_pen_state(self):
         with tempfile.TemporaryDirectory() as directory:
             relay = self.make_relay(Path(directory) / "state.json")
             relay.config.update(
                 {
-                    "GESTURE_DEVICE_NAME": "Xiaomi Focus Pen Gestures",
-                    "GESTURE_DEVICE_PHYS": "",
+                    "GESTURE_DEVICE_NAME": "Xiaomi Focus Pen Pro Gestures",
+                    "GESTURE_DEVICE_PHYS": "input/pen_p81c/gestures",
                     "GESTURE_PROXY_PHYS": "waydroid-gesture-relay",
                     "ANDROID_GESTURE_PROXY_PHYS": "waydroid-gesture-android",
                 }
@@ -214,14 +328,27 @@ class RelayTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             relay = self.make_relay(Path(directory) / "state.json")
             relay._set_pro_available(True)
-            button_data = pen_frame((MODULE.BTN_STYLUS, 1))
-            relay.forward(button_data)
-            relay.forward_gesture(gesture_frame(MODULE.KEY_PROG3, 1))
+            for code in (
+                MODULE.BTN_6,
+                MODULE.BTN_7,
+                MODULE.BTN_8,
+                MODULE.BTN_9,
+            ):
+                relay.forward_gesture(gesture_frame(code, 1))
 
-        self.assertEqual(relay.proxy.writes, [button_data])
+        self.assertEqual(
+            event_values(relay.proxy.writes),
+            [
+                (MODULE.EV_KEY, MODULE.BTN_STYLUS, 1),
+                (MODULE.EV_KEY, MODULE.BTN_STYLUS2, 1),
+            ],
+        )
         self.assertEqual(
             event_values(relay.gesture_proxy.writes),
-            [(MODULE.EV_KEY, MODULE.KEY_PROG3, 1)],
+            [
+                (MODULE.EV_KEY, MODULE.KEY_PROG3, 1),
+                (MODULE.EV_KEY, MODULE.KEY_PROG4, 1),
+            ],
         )
         self.assertEqual(relay.android_gesture_proxy.writes, [])
 
@@ -230,18 +357,10 @@ class RelayTests(unittest.TestCase):
             relay = self.make_relay(Path(directory) / "state.json")
             relay._set_pro_available(True)
             relay.set_direct_mode(relay.capability_generation, True)
-            relay.forward(
-                pen_frame(
-                    (MODULE.BTN_STYLUS, 1),
-                    (MODULE.BTN_STYLUS2, 1),
-                )
-            )
-            relay.forward(
-                pen_frame(
-                    (MODULE.BTN_STYLUS, 2),
-                    (MODULE.BTN_STYLUS2, 1),
-                )
-            )
+            relay.forward(pen_frame())
+            relay.forward_gesture(gesture_frame(MODULE.BTN_6, 1))
+            relay.forward_gesture(gesture_frame(MODULE.BTN_7, 1))
+            relay.forward_gesture(gesture_frame(MODULE.BTN_6, 1))
 
         pen_values = event_values(relay.android_proxy.writes)
         self.assertNotIn((MODULE.EV_KEY, MODULE.BTN_STYLUS, 1), pen_values)
@@ -259,19 +378,13 @@ class RelayTests(unittest.TestCase):
             relay = self.make_relay(Path(directory) / "state.json")
             relay.set_direct_mode(relay.capability_generation, False)
             relay._set_pro_available(True)
-            relay.forward(pen_frame((MODULE.BTN_STYLUS, 1)))
+            relay.forward_gesture(gesture_frame(MODULE.BTN_6, 1))
 
             self.assertFalse(relay.android_pro_active)
-            self.assertIn(
-                (MODULE.EV_KEY, MODULE.BTN_STYLUS, 1),
-                event_values(relay.android_proxy.writes),
-            )
             self.assertEqual(relay.android_gesture_proxy.writes, [])
 
             relay.activate_android_pro(relay.capability_generation)
-            relay.forward(pen_frame((MODULE.BTN_STYLUS, 0)))
-            relay.forward(pen_frame((MODULE.BTN_STYLUS, 1)))
-            relay.forward(pen_frame((MODULE.BTN_STYLUS, 0)))
+            relay.forward_gesture(gesture_frame(MODULE.BTN_6, 0))
 
         self.assertTrue(relay.android_pro_active)
         self.assertEqual(
@@ -287,7 +400,7 @@ class RelayTests(unittest.TestCase):
             relay = self.make_relay(Path(directory) / "state.json")
             relay._set_pro_available(True)
             relay.set_direct_mode(relay.capability_generation, True)
-            for code in (MODULE.KEY_PROG3, MODULE.KEY_PROG4):
+            for code in (MODULE.BTN_8, MODULE.BTN_9):
                 relay.forward_gesture(gesture_frame(code, 1))
                 relay.forward_gesture(gesture_frame(code, 0))
 
@@ -331,15 +444,8 @@ class RelayTests(unittest.TestCase):
             relay._set_pro_available(True)
             relay.set_direct_mode(relay.capability_generation, True)
             generation = relay.capability_generation
-            relay.android_gesture_proxy.set_key(MODULE.KEY_PROG1, True)
-            relay.android_gesture_proxy.set_key(MODULE.KEY_PROG4, True)
-            relay.android_mapper.keys[MODULE.BTN_STYLUS] = 1
-            relay.android_mapper.keys[MODULE.BTN_STYLUS2] = 1
-            relay.android_mapper.events.append(
-                MODULE.INPUT_EVENT.unpack(
-                    MODULE.make_event(MODULE.EV_KEY, MODULE.BTN_STYLUS, 1)
-                )
-            )
+            relay.forward_gesture(gesture_frame(MODULE.BTN_6, 1))
+            relay.forward_gesture(gesture_frame(MODULE.BTN_9, 1))
             write_count = len(relay.android_gesture_proxy.writes)
             relay._set_pro_available(False)
             state = json.loads(
@@ -350,9 +456,7 @@ class RelayTests(unittest.TestCase):
         self.assertFalse(state["pro_available"])
         self.assertFalse(state["android_pro_active"])
         self.assertIsNone(state["gesture_device"])
-        self.assertEqual(relay.android_mapper.keys[MODULE.BTN_STYLUS], 0)
-        self.assertEqual(relay.android_mapper.keys[MODULE.BTN_STYLUS2], 0)
-        self.assertEqual(relay.android_mapper.events, [])
+        self.assertFalse(any(relay.pro_gesture_state.values()))
         self.assertEqual(
             set(event_values(relay.android_gesture_proxy.writes[write_count:])),
             {
@@ -395,12 +499,12 @@ class RelayTests(unittest.TestCase):
             ],
         )
 
-    def test_pen_source_disconnect_releases_synthetic_android_buttons(self):
+    def test_pen_source_disconnect_releases_pro_gesture_state(self):
         with tempfile.TemporaryDirectory() as directory:
             relay = self.make_relay(Path(directory) / "state.json")
             relay._set_pro_available(True)
             relay.set_direct_mode(relay.capability_generation, True)
-            relay.forward(pen_frame((MODULE.BTN_STYLUS, 1)))
+            relay.forward_gesture(gesture_frame(MODULE.BTN_6, 1))
             write_count = len(relay.android_gesture_proxy.writes)
             relay._close_device()
 
@@ -409,7 +513,7 @@ class RelayTests(unittest.TestCase):
             [(MODULE.EV_KEY, MODULE.KEY_PROG1, 0)],
         )
         self.assertIsNone(relay.android_mapper.axes[MODULE.ABS_X])
-        self.assertEqual(relay.android_mapper.keys[MODULE.BTN_STYLUS], 0)
+        self.assertFalse(any(relay.pro_gesture_state.values()))
 
     def test_service_exit_closes_keyboard_after_releasing_pressed_keys(self):
         keyboard = make_keyboard(MODULE.ANDROID_GESTURE_KEYS)
@@ -450,6 +554,14 @@ class RelayTests(unittest.TestCase):
         )
         self.assertEqual(x_axis[-1], 113)
         self.assertEqual(y_axis[-1], 113)
+
+    def test_proxy_axes_cover_pro_pressure_and_brake(self):
+        specs = {
+            code: (minimum, maximum, resolution)
+            for code, minimum, maximum, resolution in MODULE.PEN_AXIS_SPECS
+        }
+        self.assertEqual(specs[MODULE.ABS_PRESSURE], (0, 16383, 0))
+        self.assertEqual(specs[MODULE.ABS_BRAKE], (0, 360, 0))
 
     def test_window_mapping_expands_content_rect_to_android_axes(self):
         output = FakeProxy()

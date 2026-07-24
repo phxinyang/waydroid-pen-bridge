@@ -3,9 +3,9 @@
 Routes the Xiaomi Pad 6S Pro (`sheng`) pen between the desktop and Waydroid
 without hot-removing a tablet device from the compositor.
 
-The driver-created `NVTCapacitivePenM80p` device is always ignored by libinput.
-A small system service creates stable pen and gesture proxies for the desktop
-and Android and keeps those proxies for the full login session.
+The driver-created M80p and P81c pen devices are ignored by libinput. A small
+system service selects the active source and creates stable pen and gesture
+proxies for the desktop and Android.
 
 ## Policies
 
@@ -24,15 +24,15 @@ Waydroid. It takes effect the next time the Waydroid container starts.
 
 ## Runtime modes
 
-- **Desktop:** the relay copies the standard pen buttons to the stable desktop
-  tablet and forwards Pro slide up/down as `KEY_PROG3`/`KEY_PROG4`. Android
-  event links are absent.
+- **Desktop:** an ordinary pen keeps its standard buttons. Focus Pen Pro maps
+  `BTN_6`/`BTN_7` to `BTN_STYLUS`/`BTN_STYLUS2` on the stable tablet and maps
+  `BTN_8`/`BTN_9` to `KEY_PROG3`/`KEY_PROG4`. Android event links are absent.
 - **Direct with an ordinary pen:** Android `event4` points at the pen proxy and
   keeps `BTN_STYLUS`/`BTN_STYLUS2`. Android `event5` is absent.
-- **Direct with Focus Pen Pro:** `event4` suppresses the two standard stylus
-  buttons. The relay emits pinch, double press, slide up, and slide down once on
-  the Android gesture proxy as scan codes 148, 149, 202, and 203. Android maps
-  them to key codes 194 through 197 on `event5`.
+- **Direct with Focus Pen Pro:** P81c pen frames use `event4`. The separate Pro
+  gesture source maps pinch, double press, slide up, and slide down once to scan
+  codes 148, 149, 202, and 203. Android maps them to key codes 194 through 197
+  on `event5`.
 
 The bridge proxies remain stable while changing modes. Only Android's `event5`
 link is added or removed when Focus Pen Pro availability changes.
@@ -48,8 +48,8 @@ Overview temporarily select desktop routing while the policy is automatic.
 - Waydroid 1.6.x
 - Python 3
 - `sudo`, `systemd`, `udevadm`, `visudo` and LXC
-- The refactored `xiaomi-sheng-thp.service`, using `BUS_VIRTUAL` devices
-  `2717:3654` for the standard pen and optional `2717:3655` for Pro slides
+- `xiaomi-sheng-thp.service` with M80p/P81c `2717:3654` pen nodes and the
+  optional `0022:5081` `Xiaomi Focus Pen Pro Gestures` node
 
 ## Install
 

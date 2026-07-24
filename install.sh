@@ -205,7 +205,8 @@ sudo udevadm control --reload-rules
 for event_path in /sys/class/input/event*; do
     device_name=$(cat "$event_path/device/name" 2>/dev/null || true)
     if [[ "$device_name" == "NVTCapacitivePenM80p" \
-            || "$device_name" == "Xiaomi Focus Pen Gestures" ]]; then
+            || "$device_name" == "NVTCapacitivePenP81c" \
+            || "$device_name" == "Xiaomi Focus Pen Pro Gestures" ]]; then
         sudo udevadm trigger --action=add "$event_path"
     fi
 done

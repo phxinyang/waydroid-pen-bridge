@@ -14,6 +14,9 @@ CONFIG_PATH = Path("/etc/waydroid-pen-mode.conf")
 LOCK_PATH = Path("/run/lock/waydroid-pen-mode.lock")
 LXC_PATH = "/var/lib/waydroid/lxc"
 LXC_NAME = "waydroid"
+LXC_INFO = "/usr/bin/lxc-info"
+LXC_UNFREEZE = "/usr/bin/lxc-unfreeze"
+LXC_FREEZE = "/usr/bin/lxc-freeze"
 ANDROID_PATH = "/system/bin:/system/xbin"
 COMMAND_TIMEOUT_SECONDS = 5.0
 
@@ -60,45 +63,48 @@ def run(command, *, check=True, capture=False):
 
 
 def waydroid_shell(*arguments, check=True, capture=False):
-    return run(
-        [
-            "/usr/bin/lxc-attach",
-            "-P",
-            LXC_PATH,
-            "-n",
-            LXC_NAME,
-            "--clear-env",
-            "--set-var",
-            f"PATH={ANDROID_PATH}",
-            "--",
-            "/system/bin/sh",
-            "-c",
-            'exec "$@"',
-            "waydroid-pen-mode",
-            *arguments,
-        ],
-        check=check,
-        capture=capture,
-    )
+    command = [
+        "/usr/bin/lxc-attach",
+        "-P",
+        LXC_PATH,
+        "-n",
+        LXC_NAME,
+        "--clear-env",
+        "--set-var",
+        f"PATH={ANDROID_PATH}",
+        "--",
+        "/system/bin/sh",
+        "-c",
+        'exec "$@"',
+        "waydroid-pen-mode",
+        *arguments,
+    ]
+    thawed = waydroid_state() == "FROZEN"
+    if thawed:
+        run([LXC_UNFREEZE, "-P", LXC_PATH, "-n", LXC_NAME])
+    try:
+        return run(command, check=check, capture=capture)
+    finally:
+        if thawed:
+            run(
+                [LXC_FREEZE, "-P", LXC_PATH, "-n", LXC_NAME],
+                check=False,
+            )
 
 
-def waydroid_running():
+def waydroid_state():
     result = run(
-        [
-            "/usr/bin/lxc-info",
-            "-P",
-            LXC_PATH,
-            "-n",
-            LXC_NAME,
-            "-sH",
-        ],
+        [LXC_INFO, "-P", LXC_PATH, "-n", LXC_NAME, "-sH"],
         check=False,
         capture=True,
     )
-    return result.returncode == 0 and result.stdout.strip() in {
-        "RUNNING",
-        "FROZEN",
-    }
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip() or None
+
+
+def waydroid_running():
+    return waydroid_state() in {"RUNNING", "FROZEN"}
 
 
 def android_readlink(link_path):
