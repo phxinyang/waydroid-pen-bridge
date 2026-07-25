@@ -98,6 +98,10 @@ if command -v kpackagetool6 >/dev/null 2>&1; then
     kpackagetool6 --type KWin/Script --remove "$KWIN_ID" \
         >/dev/null 2>&1 || true
 fi
+# Hard-remove package trees if kpackagetool left anything behind.
+rm -rf \
+    "$INSTALL_HOME/.local/share/plasma/plasmoids/$PLASMOID_ID" \
+    "$INSTALL_HOME/.local/share/kwin/scripts/$KWIN_ID"
 
 if [[ -f "$LXC_CONFIG" ]] && {
     grep -Fqx "$M80P_LXC_LINE" "$LXC_CONFIG" \

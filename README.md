@@ -97,9 +97,17 @@ libinput and routes them through stable proxies.
 
 Reboot once after installation. The reboot lets udev hide the physical pen
 before the desktop starts and lets the relay create the stable proxy before
-login. Then enable the `Waydroid Pen Mode` GNOME extension. On KDE, the
-installer enables the KWin script and adds `Waydroid Pen Mode` to the System
-Tray.
+login.
+
+Desktop UI (GNOME extension / KDE tray) is configured by `user-setup.sh`, which
+`install.sh` also calls. If the mode switch panel is missing after login:
+
+```bash
+./user-setup.sh
+```
+
+On GNOME, enable `Waydroid Pen Mode` if needed. On KDE, check System Tray →
+Entries → Waydroid Pen Mode → Shown.
 
 Check the current runtime mode:
 
@@ -140,9 +148,9 @@ Uninstall removes the bridge only:
 
 - stops and disables `waydroid-pen-relay` / link-sync
 - removes udev rules, helpers, LXC pen mounts, Android overlay KL/KCM
-- removes GNOME/KDE integration
+- removes GNOME extension and KDE plasmoid/KWin mode-switch UI from the tray
 - leaves [`xiaomi-sheng-thp`](https://github.com/ianchb/xiaomi-sheng-thp) installed
 
-It also reloads udev and re-triggers the THP pen nodes so libinput can see the
-physical driver devices again. A reboot is still recommended so every session
-picks up the restored devices cleanly.
+It restarts THP so physical pen nodes are recreated without
+`LIBINPUT_IGNORE_DEVICE`. A reboot is still recommended so every session picks
+up the restored devices cleanly.

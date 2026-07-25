@@ -174,60 +174,10 @@ if ! grep -Fqx "$GESTURE_LXC_LINE" "$LXC_CONFIG"; then
     printf '%s\n' "$GESTURE_LXC_LINE" | sudo tee -a "$LXC_CONFIG" >/dev/null
 fi
 
-install -d -m 0755 "$EXTENSION_DIR"
-install -m 0644 "$ROOT_DIR/extension/extension.js" "$EXTENSION_DIR/extension.js"
-install -m 0644 "$ROOT_DIR/extension/metadata.json" "$EXTENSION_DIR/metadata.json"
-install -d -m 0700 "$POLICY_DIR"
-if [[ ! -f "$POLICY_DIR/policy" ]]; then
-    printf '%s\n' auto >"$POLICY_DIR/policy"
-fi
-install -d -m 0755 "$USER_UNIT_DIR"
-install -m 0644 \
-    "$ROOT_DIR/config/waydroid-pen-session@.service" \
-    "$USER_UNIT_DIR/waydroid-pen-session@.service"
-install -m 0644 \
-    "$ROOT_DIR/config/waydroid-pen-session-reapply.service" \
-    "$USER_UNIT_DIR/waydroid-pen-session-reapply.service"
-install -m 0644 \
-    "$ROOT_DIR/config/waydroid-pen-session.path" \
-    "$USER_UNIT_DIR/waydroid-pen-session.path"
-systemctl --user daemon-reload
-systemctl --user enable waydroid-pen-session.path >/dev/null
-systemctl --user reset-failed \
-    waydroid-pen-session-reapply.service \
-    waydroid-pen-session.path >/dev/null 2>&1 || true
-systemctl --user restart waydroid-pen-session.path
-
-if command -v kpackagetool6 >/dev/null 2>&1; then
-    if kpackagetool6 --type KWin/Script --show "$KWIN_ID" >/dev/null 2>&1; then
-        kpackagetool6 --type KWin/Script --upgrade "$ROOT_DIR/kde/kwin" >/dev/null
-    else
-        kpackagetool6 --type KWin/Script --install "$ROOT_DIR/kde/kwin" >/dev/null
-    fi
-    if kpackagetool6 --type Plasma/Applet --show "$PLASMOID_ID" >/dev/null 2>&1; then
-        kpackagetool6 --type Plasma/Applet --upgrade "$ROOT_DIR/kde/plasmoid" >/dev/null
-    else
-        kpackagetool6 --type Plasma/Applet --install "$ROOT_DIR/kde/plasmoid" >/dev/null
-    fi
-fi
-
-if command -v kwriteconfig6 >/dev/null 2>&1; then
-    kwriteconfig6 --file kwinrc --group Plugins \
-        --key "${KWIN_ID}Enabled" true
-fi
-
-if command -v gdbus >/dev/null 2>&1; then
-    gdbus call --session --dest org.kde.KWin --object-path /Scripting \
-        --method org.kde.kwin.Scripting.unloadScript "$KWIN_ID" \
-        >/dev/null 2>&1 || true
-    gdbus call --session --dest org.kde.KWin --object-path /Scripting \
-        --method org.kde.kwin.Scripting.start >/dev/null 2>&1 || true
-
-    plasma_script='const widgetName = "org.xinyang.waydroidpenmode"; for (const panelId of panelIds) { const panel = panelById(panelId); if (!panel) continue; for (const widgetId of panel.widgetIds) { const widget = panel.widgetById(widgetId); if (!widget || widget.type !== "org.kde.plasma.systemtray") continue; widget.currentConfigGroup = ["General"]; const extraItems = String(widget.readConfig("extraItems") || "").split(",").filter(item => item.length > 0); if (!extraItems.includes(widgetName)) { extraItems.push(widgetName); widget.writeConfig("extraItems", extraItems); widget.reloadConfig(); } } }'
-    gdbus call --session --dest org.kde.plasmashell \
-        --object-path /PlasmaShell \
-        --method org.kde.PlasmaShell.evaluateScript "$plasma_script" \
-        >/dev/null 2>&1 || true
+# User-session pieces (GNOME extension, KDE tray/script, user units).
+if [[ -x "$ROOT_DIR/user-setup.sh" ]]; then
+    # Keep going even if the graphical session bus is unavailable during install.
+    "$ROOT_DIR/user-setup.sh" || true
 fi
 
 if waydroid_container_available; then
@@ -267,9 +217,10 @@ elif sudo systemctl is-active --quiet waydroid-pen-relay.service; then
     sudo systemctl restart waydroid-pen-link-sync.path
 fi
 
-echo "Installed waydroid-pen-bridge."
+echo "Installed waydroid-pen-bridge (system)."
 echo "Prerequisite: xiaomi-sheng-thp remains the pen driver; this package only routes it."
 echo "Restart Waydroid, then reboot once so udev hides the physical pen before login"
 echo "and the relay creates stable proxies."
-echo "On GNOME, enable the Waydroid Pen Mode extension."
-echo "On KDE, the Waydroid Pen Mode item is available in the System Tray."
+echo "If the mode switch UI is missing after login, run: ./user-setup.sh"
+echo "On GNOME, enable the Waydroid Pen Mode extension if needed."
+echo "On KDE, the Waydroid Pen Mode item should appear in the System Tray."

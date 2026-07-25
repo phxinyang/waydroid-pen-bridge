@@ -50,7 +50,16 @@ Android keylayout 只负责传输转换：普通笔或 M80p/P81c 笔节点的扫
 [`xiaomi-sheng-thp`](https://github.com/ianchb/xiaomi-sheng-thp)。
 它不会替换或卸载 THP 驱动，只是让 libinput 忽略驱动节点，并通过稳定代理转发。
 
-安装后重启一次。重启可以让 udev 在桌面登录前隐藏物理触控笔，并让 relay 创建稳定代理。GNOME 用户随后需要启用 `Waydroid Pen Mode` 扩展。KDE 用户安装后会自动启用 KWin 脚本，并在系统托盘中加入 `Waydroid Pen Mode`。
+安装后重启一次。重启可以让 udev 在桌面登录前隐藏物理触控笔，并让 relay 创建稳定代理。
+
+桌面 UI（GNOME 扩展 / KDE 托盘）由 `user-setup.sh` 配置，`install.sh` 也会调用它。
+若登录后看不到模式切换面板：
+
+```bash
+./user-setup.sh
+```
+
+GNOME 可再启用 `Waydroid Pen Mode`；KDE 可在系统托盘 → 条目里把 Waydroid Pen Mode 设为显示。
 
 查看当前运行模式：
 
@@ -89,7 +98,7 @@ sudo /usr/local/libexec/waydroid-pen-mode unmap
 
 - 停止并禁用 `waydroid-pen-relay` / link-sync
 - 删除 udev 规则、helper、LXC 笔挂载、Android overlay 的 KL/KCM
-- 删除 GNOME/KDE 集成
+- 删除 GNOME 扩展与 KDE 托盘/KWin 模式切换面板
 - **保留** [`xiaomi-sheng-thp`](https://github.com/ianchb/xiaomi-sheng-thp)
 
-脚本会 reload udev 并重新 trigger THP 笔节点，尽量让 libinput 立刻重新看到物理驱动设备。仍建议重启一次，确保会话完整恢复。卸载后桌面笔应再次直接来自 THP。
+卸载会重启 THP，以重建不带 `LIBINPUT_IGNORE_DEVICE` 的物理笔节点。仍建议重启一次。卸载后桌面笔应再次直接来自 THP。
