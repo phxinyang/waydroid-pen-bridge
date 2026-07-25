@@ -4,7 +4,7 @@ BindsTo=waydroid-pen-relay.service
 After=waydroid-pen-relay.service
 
 [Path]
-PathChanged=/run/waydroid-pen-mode/state.json
+PathChanged=/run/waydroid-pen-mode/link-state.json
 Unit=waydroid-pen-link-sync.service
 
 [Install]

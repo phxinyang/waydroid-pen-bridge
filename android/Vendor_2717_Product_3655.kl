@@ -1,3 +1,7 @@
+# The bridge preserves the driver's Linux key codes.  Android's stable
+# BUTTON_7..10 transport is converted by the compat layer to 194..197.
+key 331   BUTTON_7
+key 332   BUTTON_8
 key 262   BUTTON_7
 key 263   BUTTON_8
 key 264   BUTTON_9

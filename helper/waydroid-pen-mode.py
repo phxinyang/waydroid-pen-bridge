@@ -22,9 +22,15 @@ COMMAND_TIMEOUT_SECONDS = 5.0
 
 DEFAULTS = {
     "CONTROL_SOCKET": "/run/waydroid-pen-mode/control.sock",
+    "ANDROID_M80P_DEVICE": "/dev/waydroid_pen_m80p",
+    "ANDROID_P81C_DEVICE": "/dev/waydroid_pen_p81c",
+    "ANDROID_BUTTON_DEVICE": "/dev/waydroid_pen_buttons",
     "ANDROID_DEVICE": "/dev/waydroid_pen",
     "ANDROID_LINK": "/dev/input/event4",
+    "ANDROID_LINK_TARGET_M80P": "../waydroid_pen_m80p",
+    "ANDROID_LINK_TARGET_P81C": "../waydroid_pen_p81c",
     "ANDROID_LINK_TARGET": "../waydroid_pen",
+    "ANDROID_BUTTON_LINK_TARGET": "../waydroid_pen_buttons",
     "ANDROID_GESTURE_DEVICE": "/dev/waydroid_pen_gesture",
     "ANDROID_GESTURE_LINK": "/dev/input/event5",
     "ANDROID_GESTURE_LINK_TARGET": "../waydroid_pen_gesture",
@@ -139,26 +145,82 @@ def android_path_exists(path):
     raise ModeError(f"failed to inspect Android path {path}")
 
 
-def android_links(config):
+def _pen_link_targets(config):
+    return {
+        "m80p": (
+            config.get("ANDROID_M80P_DEVICE", "/dev/waydroid_pen_m80p"),
+            config.get("ANDROID_LINK_TARGET_M80P", "../waydroid_pen_m80p"),
+        ),
+        "p81c": (
+            config.get("ANDROID_P81C_DEVICE", "/dev/waydroid_pen_p81c"),
+            config.get("ANDROID_LINK_TARGET_P81C", "../waydroid_pen_p81c"),
+        ),
+    }
+
+
+def _side_link_target(config, relay):
+    # event5 is a single active-pen side channel.  A paired Pro gestures
+    # source must not steal the ordinary M80p button route while M80p is the
+    # active pen.
+    if (relay.get("active_pen") == "p81c"
+            and relay.get("pro_available")):
+        return (
+            config["ANDROID_GESTURE_DEVICE"],
+            config["ANDROID_GESTURE_LINK_TARGET"],
+            "gesture",
+        )
+    if (relay.get("active_pen") == "m80p"
+            and relay.get("mode") == "desktop"
+            and relay.get("android_button_active")):
+        return (
+            config.get("ANDROID_BUTTON_DEVICE", "/dev/waydroid_pen_buttons"),
+            config.get("ANDROID_BUTTON_LINK_TARGET", "../waydroid_pen_buttons"),
+            "button",
+        )
+    return None
+
+
+def android_links(config, relay=None):
+    """Return the desired event4/event5 links for a relay snapshot.
+
+    Both model devices are mounted into LXC permanently.  event4 points at
+    the active model only in direct mode; event5 points at Pro gestures or the
+    ordinary-button side channel when that route is required.
+    """
+    relay = relay or {}
+    targets = _pen_link_targets(config)
+    active = relay.get("active_pen")
+    pen_device, pen_target = targets.get(active, (None, None))
+    pen_owned = {target for _device, target in targets.values()}
+    # Migrate the previous one-device installation without treating it as a
+    # foreign link.
+    pen_owned.add(config.get("ANDROID_LINK_TARGET", "../waydroid_pen"))
+    side = _side_link_target(config, relay)
+    side_targets = {
+        config.get("ANDROID_BUTTON_LINK_TARGET", "../waydroid_pen_buttons"),
+        config.get("ANDROID_GESTURE_LINK_TARGET", "../waydroid_pen_gesture"),
+    }
     return (
         {
-            "device": config["ANDROID_DEVICE"],
+            "device": pen_device,
             "link": config["ANDROID_LINK"],
-            "target": config["ANDROID_LINK_TARGET"],
+            "target": pen_target if relay.get("mode") == "direct" else None,
+            "owned_targets": pen_owned,
             "capability": "pen",
         },
         {
-            "device": config["ANDROID_GESTURE_DEVICE"],
+            "device": side[0] if side else None,
             "link": config["ANDROID_GESTURE_LINK"],
-            "target": config["ANDROID_GESTURE_LINK_TARGET"],
-            "capability": "pro",
+            "target": side[1] if side else None,
+            "owned_targets": side_targets,
+            "capability": side[2] if side else "side",
         },
     )
 
 
 def inspect_android_link(spec):
     target = android_readlink(spec["link"])
-    if target == spec["target"]:
+    if target in spec.get("owned_targets", {spec.get("target")}):
         return "owned", target
     if target is not None:
         return "foreign", target
@@ -170,23 +232,34 @@ def inspect_android_link(spec):
 def remove_owned_android_links(config):
     if not waydroid_running():
         return
-    for spec in android_links(config):
+    for spec in android_links(config, {"mode": "desktop"}):
         state, _target = inspect_android_link(spec)
         if state == "owned":
             waydroid_shell("unlink", spec["link"], check=False)
 
 
-def sync_android_links(config, pen_required, pro_available):
+def sync_android_links(config, relay_or_pen_required, pro_available=None,
+                       active_pen=None):
+    # Keep the old three-argument entry point for local callers while making
+    # the relay snapshot the source of truth for active model and side route.
+    if isinstance(relay_or_pen_required, bool):
+        relay = {
+            "mode": "direct" if relay_or_pen_required else "desktop",
+            "pro_available": bool(pro_available),
+            "active_pen": active_pen or ("p81c" if pro_available else "m80p"),
+            "android_button_active": False,
+        }
+    else:
+        relay = dict(relay_or_pen_required)
     if not waydroid_running():
         raise ModeError("Waydroid is not running")
 
-    specs = android_links(config)
-    required = {
-        spec["capability"]
-        for spec in specs
-        if (spec["capability"] == "pen" and pen_required)
-        or (spec["capability"] == "pro" and pro_available)
-    }
+    specs = android_links(config, relay)
+    required = set()
+    if relay.get("mode") == "direct" and specs[0]["target"] is not None:
+        required.add("pen")
+    if specs[1]["target"] is not None:
+        required.add(specs[1]["capability"])
     states = {}
     for spec in specs:
         state, target = inspect_android_link(spec)
@@ -194,31 +267,40 @@ def sync_android_links(config, pen_required, pro_available):
             raise ModeError(
                 f"refusing to replace Android link {spec['link']} -> {target}"
             )
-        states[spec["capability"]] = state
+        states[spec["capability"]] = (state, target)
 
     for spec in specs:
-        if spec["capability"] not in required:
+        if spec["capability"] not in required or not spec["device"]:
             continue
         probe = waydroid_shell("test", "-c", spec["device"], check=False)
         if probe.returncode != 0:
             raise ModeError(f"Waydroid device is missing: {spec['device']}")
 
-    for spec in specs:
-        if spec["capability"] not in required and states[spec["capability"]] == "owned":
-            waydroid_shell("unlink", spec["link"])
-
+    # Apply the complete two-link update as a small transaction.  A failed
+    # event5 replacement must restore the previous owned event4/event5 links,
+    # otherwise a mode switch leaves Android with a half-configured path.
+    removed = []
     created = []
     try:
         for spec in specs:
-            if spec["capability"] not in required:
+            state, current = states[spec["capability"]]
+            desired = spec["target"] if spec["capability"] in required else None
+            if state != "owned" or current == desired:
                 continue
-            if states[spec["capability"]] == "owned":
+            waydroid_shell("unlink", spec["link"])
+            removed.append((spec, current))
+        for spec in specs:
+            state, current = states[spec["capability"]]
+            desired = spec["target"] if spec["capability"] in required else None
+            if desired is None or (state == "owned" and current == desired):
                 continue
-            waydroid_shell("ln", "-s", spec["target"], spec["link"])
+            waydroid_shell("ln", "-s", desired, spec["link"])
             created.append(spec)
     except Exception:
         for spec in reversed(created):
             waydroid_shell("unlink", spec["link"], check=False)
+        for spec, target in reversed(removed):
+            waydroid_shell("ln", "-s", target, spec["link"], check=False)
         raise
 
 
@@ -271,7 +353,29 @@ def routing_snapshot(relay):
     mode = relay.get("mode")
     if mode not in {"desktop", "direct"}:
         raise ModeError("pen relay returned an invalid routing mode")
-    return mode, generation, pro_available
+    active_pen = relay.get("active_pen")
+    if active_pen not in {None, "m80p", "p81c"}:
+        raise ModeError("pen relay returned an invalid active pen")
+    booleans = (
+        "waydroid_focused",
+        "android_pro_active",
+        "android_button_active",
+    )
+    for field in booleans:
+        value = relay.get(field, False)
+        if not isinstance(value, bool):
+            if field == "waydroid_focused":
+                raise ModeError("pen relay returned an invalid focus state")
+            raise ModeError(f"pen relay returned an invalid {field} state")
+    return (
+        mode,
+        generation,
+        pro_available,
+        active_pen,
+        relay.get("waydroid_focused", False),
+        relay.get("android_pro_active", False),
+        relay.get("android_button_active", False),
+    )
 
 
 def routing_matches(left, right):
@@ -279,27 +383,26 @@ def routing_matches(left, right):
 
 
 def android_pro_should_be_active(relay):
-    _mode, _generation, pro_available = routing_snapshot(relay)
-    focused = relay.get("waydroid_focused")
-    if not isinstance(focused, bool):
-        raise ModeError("pen relay returned an invalid focus state")
-    return pro_available and focused
+    _mode, _generation, pro_available, active, focused, _pro_active, _button_active = (
+        routing_snapshot(relay)
+    )
+    return pro_available and active == "p81c" and focused
 
 
 def android_pro_is_active(relay):
-    active = relay.get("android_pro_active")
+    active = relay.get("android_pro_active", False)
     if not isinstance(active, bool):
         raise ModeError("pen relay returned an invalid Android Pro state")
     return active
 
 
 def prepare_android_links(config, relay):
-    mode, generation, pro_available = routing_snapshot(relay)
-    sync_android_links(config, mode == "direct", pro_available)
+    snapshot = routing_snapshot(relay)
+    sync_android_links(config, relay)
     current = relay_command(config, "status")
     if not routing_matches(relay, current):
         return None, current
-    return (generation, pro_available), current
+    return snapshot, current
 
 
 def reconcile_android_links(config, relay):
@@ -308,7 +411,7 @@ def reconcile_android_links(config, relay):
         if prepared is None:
             relay = current
             continue
-        generation, _pro_available = prepared
+        _mode, generation, _pro_available, _active, _focused, _pro_active, _button_active = prepared
         if android_pro_should_be_active(current) and not android_pro_is_active(
             current
         ):
@@ -332,10 +435,12 @@ def reconcile_android_links(config, relay):
 
 
 def prepare_direct_links(config, relay):
-    generation, pro_available = capability_snapshot(relay)
-    sync_android_links(config, True, pro_available)
+    snapshot = routing_snapshot(dict(relay, mode="direct"))
+    _mode, generation, pro_available, _active, _focused, _pro_active, _button_active = snapshot
+    sync_android_links(config, dict(relay, mode="direct"))
     current = relay_command(config, "status")
-    if not capability_matches(relay, current):
+    if not routing_matches(dict(relay, mode="direct"),
+                           dict(current, mode="direct")):
         return None, current
     return (generation, pro_available), current
 
@@ -426,12 +531,31 @@ def focus_mode(config, focused):
     if focused:
         if not waydroid_running():
             raise ModeError("Waydroid is not running")
-        # Create event5 before enabling the relay's Android side channel.
-        relay = reconcile_android_links(config, relay)
-    relay = relay_command(config, f"focus {int(focused)}")
-    if focused:
-        relay = reconcile_android_links(config, relay)
-    return relay
+        # Prepare the side channel before enabling forwarding.  For an
+        # ordinary pen the relay reports the route only after focus is set, so
+        # predict that one field for the preflight link transaction.
+        predicted = dict(relay, waydroid_focused=True)
+        if (predicted.get("active_pen") == "m80p" and
+                predicted.get("mode") == "desktop"):
+            predicted["android_button_active"] = True
+        sync_android_links(config, predicted)
+    try:
+        relay = relay_command(config, f"focus {int(focused)}")
+        # Focus changes are the only state changes that alter the ordinary
+        # button side-channel target.  Reconcile explicitly; link-state.path
+        # intentionally does not watch focus/map churn.
+        if waydroid_running():
+            relay = reconcile_android_links(config, relay)
+        return relay
+    except Exception:
+        if focused:
+            try:
+                relay_command(config, "focus 0")
+                if waydroid_running():
+                    reconcile_android_links(config, relay_command(config, "status"))
+            except Exception:
+                pass
+        raise
 
 
 def status(config):

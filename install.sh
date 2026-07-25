@@ -11,8 +11,12 @@ LINK_SYNC_PATH=/etc/systemd/system/waydroid-pen-link-sync.path
 LINK_SYNC_SERVICE=/etc/systemd/system/waydroid-pen-link-sync.service
 WAYDROID_DROPIN=/etc/systemd/system/waydroid-container.service.d/90-pen-relay.conf
 LXC_CONFIG=/var/lib/waydroid/lxc/waydroid/config_nodes
-LXC_LINE='lxc.mount.entry = /dev/input/waydroid-android-pen dev/waydroid_pen none bind,create=file,optional 0 0'
+M80P_LXC_LINE='lxc.mount.entry = /dev/input/waydroid-android-pen-m80p dev/waydroid_pen_m80p none bind,create=file,optional 0 0'
+P81C_LXC_LINE='lxc.mount.entry = /dev/input/waydroid-android-pen-p81c dev/waydroid_pen_p81c none bind,create=file,optional 0 0'
+BUTTON_LXC_LINE='lxc.mount.entry = /dev/input/waydroid-android-buttons dev/waydroid_pen_buttons none bind,create=file,optional 0 0'
 GESTURE_LXC_LINE='lxc.mount.entry = /dev/input/waydroid-android-gestures dev/waydroid_pen_gesture none bind,create=file,optional 0 0'
+# Mount used by the previous single-pen bridge release.
+LEGACY_ANDROID_PEN_LXC_LINE='lxc.mount.entry = /dev/input/waydroid-android-pen dev/waydroid_pen none bind,create=file,optional 0 0'
 LEGACY_LXC_LINE='lxc.mount.entry = /dev/input/waydroid-pen dev/waydroid_pen none bind,create=file,optional 0 0'
 ANDROID_OVERLAY=/var/lib/waydroid/overlay/system/usr
 LXC_PATH=/var/lib/waydroid/lxc
@@ -81,6 +85,12 @@ sudo install -D -o root -g root -m 0644 \
 sudo install -D -o root -g root -m 0644 \
     "$ROOT_DIR/config/waydroid-pen-mode.conf" /etc/waydroid-pen-mode.conf
 sudo install -D -o root -g root -m 0644 \
+    "$ROOT_DIR/android/Vendor_2717_Product_3654.kl" \
+    "$ANDROID_OVERLAY/keylayout/Vendor_2717_Product_3654.kl"
+sudo install -D -o root -g root -m 0644 \
+    "$ROOT_DIR/android/Vendor_2717_Product_3654.kcm" \
+    "$ANDROID_OVERLAY/keychars/Vendor_2717_Product_3654.kcm"
+sudo install -D -o root -g root -m 0644 \
     "$ROOT_DIR/android/Vendor_2717_Product_3655.kl" \
     "$ANDROID_OVERLAY/keylayout/Vendor_2717_Product_3655.kl"
 sudo install -D -o root -g root -m 0644 \
@@ -114,19 +124,37 @@ sudo install -D -o root -g root -m 0440 "$sudoers_tmp" "$SUDOERS_PATH"
 rm "$sudoers_tmp"
 
 lxc_backed_up=false
-if grep -Fqx "$LEGACY_LXC_LINE" "$LXC_CONFIG"; then
+if grep -Fqx "$LEGACY_ANDROID_PEN_LXC_LINE" "$LXC_CONFIG" \
+        || grep -Fqx "$LEGACY_LXC_LINE" "$LXC_CONFIG"; then
     sudo cp -a "$LXC_CONFIG" "$LXC_CONFIG.wayland-pen-mode-backup-$(date +%Y%m%d-%H%M%S)"
     lxc_backed_up=true
     config_tmp=$(mktemp)
-    grep -Fvx "$LEGACY_LXC_LINE" "$LXC_CONFIG" >"$config_tmp"
+    awk -v old_android="$LEGACY_ANDROID_PEN_LXC_LINE" \
+        -v old_legacy="$LEGACY_LXC_LINE" \
+        '$0 != old_android && $0 != old_legacy { print }' \
+        "$LXC_CONFIG" >"$config_tmp"
     sudo install -o root -g root -m 0644 "$config_tmp" "$LXC_CONFIG"
     rm "$config_tmp"
 fi
-if ! grep -Fqx "$LXC_LINE" "$LXC_CONFIG"; then
+if ! grep -Fqx "$M80P_LXC_LINE" "$LXC_CONFIG"; then
     if [[ "$lxc_backed_up" == false ]]; then
         sudo cp -a "$LXC_CONFIG" "$LXC_CONFIG.wayland-pen-mode-backup-$(date +%Y%m%d-%H%M%S)"
     fi
-    printf '%s\n' "$LXC_LINE" | sudo tee -a "$LXC_CONFIG" >/dev/null
+    printf '%s\n' "$M80P_LXC_LINE" | sudo tee -a "$LXC_CONFIG" >/dev/null
+    lxc_backed_up=true
+fi
+if ! grep -Fqx "$P81C_LXC_LINE" "$LXC_CONFIG"; then
+    if [[ "$lxc_backed_up" == false ]]; then
+        sudo cp -a "$LXC_CONFIG" "$LXC_CONFIG.wayland-pen-mode-backup-$(date +%Y%m%d-%H%M%S)"
+    fi
+    printf '%s\n' "$P81C_LXC_LINE" | sudo tee -a "$LXC_CONFIG" >/dev/null
+    lxc_backed_up=true
+fi
+if ! grep -Fqx "$BUTTON_LXC_LINE" "$LXC_CONFIG"; then
+    if [[ "$lxc_backed_up" == false ]]; then
+        sudo cp -a "$LXC_CONFIG" "$LXC_CONFIG.wayland-pen-mode-backup-$(date +%Y%m%d-%H%M%S)"
+    fi
+    printf '%s\n' "$BUTTON_LXC_LINE" | sudo tee -a "$LXC_CONFIG" >/dev/null
     lxc_backed_up=true
 fi
 if ! grep -Fqx "$GESTURE_LXC_LINE" "$LXC_CONFIG"; then
@@ -154,7 +182,11 @@ install -m 0644 \
     "$ROOT_DIR/config/waydroid-pen-session.path" \
     "$USER_UNIT_DIR/waydroid-pen-session.path"
 systemctl --user daemon-reload
-systemctl --user enable --now waydroid-pen-session.path >/dev/null
+systemctl --user enable waydroid-pen-session.path >/dev/null
+systemctl --user reset-failed \
+    waydroid-pen-session-reapply.service \
+    waydroid-pen-session.path >/dev/null 2>&1 || true
+systemctl --user restart waydroid-pen-session.path
 
 if command -v kpackagetool6 >/dev/null 2>&1; then
     if kpackagetool6 --type KWin/Script --show "$KWIN_ID" >/dev/null 2>&1; then
@@ -192,11 +224,11 @@ if waydroid_container_available; then
     waydroid_container_shell setprop \
         persist.device_config.input_native_boot.palm_rejection_enabled 1
     target=$(waydroid_container_shell readlink /dev/input/event4 2>/dev/null || true)
-    if [[ "$target" == ../waydroid_pen ]]; then
+    if [[ "$target" == ../waydroid_pen || "$target" == ../waydroid_pen_m80p || "$target" == ../waydroid_pen_p81c ]]; then
         waydroid_container_shell unlink /dev/input/event4 || true
     fi
     gesture_target=$(waydroid_container_shell readlink /dev/input/event5 2>/dev/null || true)
-    if [[ "$gesture_target" == ../waydroid_pen_gesture ]]; then
+    if [[ "$gesture_target" == ../waydroid_pen_gesture || "$gesture_target" == ../waydroid_pen_buttons ]]; then
         waydroid_container_shell unlink /dev/input/event5 || true
     fi
 fi
@@ -213,8 +245,14 @@ for event_path in /sys/class/input/event*; do
 done
 sudo udevadm settle
 sudo systemctl daemon-reload
+sudo systemctl reset-failed \
+    waydroid-pen-link-sync.service \
+    waydroid-pen-link-sync.path >/dev/null 2>&1 || true
 sudo systemctl enable \
     waydroid-pen-relay.service waydroid-pen-link-sync.path >/dev/null
+if sudo systemctl is-active --quiet waydroid-pen-relay.service; then
+    sudo systemctl restart waydroid-pen-link-sync.path
+fi
 
 echo "Installed. Restart Waydroid, then reboot once so the desktop starts with the stable proxy."
 echo "On GNOME, enable the Waydroid Pen Mode extension."

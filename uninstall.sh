@@ -5,8 +5,11 @@ UUID=waydroid-pen-mode@sheng
 HELPER=/usr/local/libexec/waydroid-pen-mode
 SESSION=/usr/local/libexec/waydroid-pen-session
 LXC_CONFIG=/var/lib/waydroid/lxc/waydroid/config_nodes
-LXC_LINE='lxc.mount.entry = /dev/input/waydroid-android-pen dev/waydroid_pen none bind,create=file,optional 0 0'
+M80P_LXC_LINE='lxc.mount.entry = /dev/input/waydroid-android-pen-m80p dev/waydroid_pen_m80p none bind,create=file,optional 0 0'
+P81C_LXC_LINE='lxc.mount.entry = /dev/input/waydroid-android-pen-p81c dev/waydroid_pen_p81c none bind,create=file,optional 0 0'
+BUTTON_LXC_LINE='lxc.mount.entry = /dev/input/waydroid-android-buttons dev/waydroid_pen_buttons none bind,create=file,optional 0 0'
 GESTURE_LXC_LINE='lxc.mount.entry = /dev/input/waydroid-android-gestures dev/waydroid_pen_gesture none bind,create=file,optional 0 0'
+LEGACY_ANDROID_PEN_LXC_LINE='lxc.mount.entry = /dev/input/waydroid-android-pen dev/waydroid_pen none bind,create=file,optional 0 0'
 LEGACY_LXC_LINE='lxc.mount.entry = /dev/input/waydroid-pen dev/waydroid_pen none bind,create=file,optional 0 0'
 ANDROID_OVERLAY=/var/lib/waydroid/overlay/system/usr
 LXC_PATH=/var/lib/waydroid/lxc
@@ -50,11 +53,11 @@ if waydroid_container_available; then
     waydroid_container_shell setprop \
         persist.device_config.input_native_boot.palm_rejection_enabled '' || true
     event4_target=$(waydroid_container_shell readlink /dev/input/event4 2>/dev/null || true)
-    if [[ "$event4_target" == ../waydroid_pen ]]; then
+    if [[ "$event4_target" == ../waydroid_pen || "$event4_target" == ../waydroid_pen_m80p || "$event4_target" == ../waydroid_pen_p81c ]]; then
         waydroid_container_shell unlink /dev/input/event4 || true
     fi
     event5_target=$(waydroid_container_shell readlink /dev/input/event5 2>/dev/null || true)
-    if [[ "$event5_target" == ../waydroid_pen_gesture ]]; then
+    if [[ "$event5_target" == ../waydroid_pen_gesture || "$event5_target" == ../waydroid_pen_buttons ]]; then
         waydroid_container_shell unlink /dev/input/event5 || true
     fi
 fi
@@ -80,9 +83,24 @@ if command -v kpackagetool6 >/dev/null 2>&1; then
         >/dev/null 2>&1 || true
 fi
 
-if [[ -f "$LXC_CONFIG" ]] && { grep -Fqx "$LXC_LINE" "$LXC_CONFIG" || grep -Fqx "$GESTURE_LXC_LINE" "$LXC_CONFIG" || grep -Fqx "$LEGACY_LXC_LINE" "$LXC_CONFIG"; }; then
+if [[ -f "$LXC_CONFIG" ]] && {
+    grep -Fqx "$M80P_LXC_LINE" "$LXC_CONFIG" \
+        || grep -Fqx "$P81C_LXC_LINE" "$LXC_CONFIG" \
+        || grep -Fqx "$BUTTON_LXC_LINE" "$LXC_CONFIG" \
+        || grep -Fqx "$GESTURE_LXC_LINE" "$LXC_CONFIG" \
+        || grep -Fqx "$LEGACY_ANDROID_PEN_LXC_LINE" "$LXC_CONFIG" \
+        || grep -Fqx "$LEGACY_LXC_LINE" "$LXC_CONFIG";
+}; then
     config_tmp=$(mktemp)
-    grep -Fvx "$LXC_LINE" "$LXC_CONFIG" | grep -Fvx "$GESTURE_LXC_LINE" | grep -Fvx "$LEGACY_LXC_LINE" >"$config_tmp"
+    awk -v m80p="$M80P_LXC_LINE" \
+        -v p81c="$P81C_LXC_LINE" \
+        -v buttons="$BUTTON_LXC_LINE" \
+        -v gestures="$GESTURE_LXC_LINE" \
+        -v old_android="$LEGACY_ANDROID_PEN_LXC_LINE" \
+        -v old_legacy="$LEGACY_LXC_LINE" \
+        '$0 != m80p && $0 != p81c && $0 != buttons && \
+         $0 != gestures && $0 != old_android && $0 != old_legacy { print }' \
+        "$LXC_CONFIG" >"$config_tmp"
     sudo install -o root -g root -m 0644 "$config_tmp" "$LXC_CONFIG"
     rm "$config_tmp"
 fi
@@ -97,6 +115,8 @@ sudo rm -f \
     /etc/waydroid-pen-mode.conf \
     /usr/local/libexec/waydroid-pen-relay \
     "$SESSION" \
+    "$ANDROID_OVERLAY/keylayout/Vendor_2717_Product_3654.kl" \
+    "$ANDROID_OVERLAY/keychars/Vendor_2717_Product_3654.kcm" \
     "$ANDROID_OVERLAY/keylayout/Vendor_2717_Product_3655.kl" \
     "$ANDROID_OVERLAY/keychars/Vendor_2717_Product_3655.kcm" \
     "$HELPER"

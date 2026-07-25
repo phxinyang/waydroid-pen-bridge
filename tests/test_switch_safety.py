@@ -27,10 +27,17 @@ PLASMOID_METADATA = ROOT / "kde" / "plasmoid" / "metadata.json"
 PLASMOID_MAIN = ROOT / "kde" / "plasmoid" / "contents" / "ui" / "main.qml"
 GESTURE_KEYLAYOUT_PATH = ROOT / "android" / "Vendor_2717_Product_3655.kl"
 GESTURE_KEYCHARS_PATH = ROOT / "android" / "Vendor_2717_Product_3655.kcm"
+PEN_KEYLAYOUT_PATH = ROOT / "android" / "Vendor_2717_Product_3654.kl"
+PEN_KEYCHARS_PATH = ROOT / "android" / "Vendor_2717_Product_3654.kcm"
 
 SPEC = importlib.util.spec_from_file_location("waydroid_pen_mode", HELPER_PATH)
 MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
+RELAY_SPEC = importlib.util.spec_from_file_location(
+    "waydroid_pen_relay", RELAY_PATH
+)
+RELAY = importlib.util.module_from_spec(RELAY_SPEC)
+RELAY_SPEC.loader.exec_module(RELAY)
 
 
 def result(returncode=0, stdout=""):
@@ -41,9 +48,15 @@ class SwitchSafetyTests(unittest.TestCase):
     def test_android_mapping_is_unified_194_through_197(self):
         keylayout = GESTURE_KEYLAYOUT_PATH.read_text(encoding="utf-8")
         keychars = GESTURE_KEYCHARS_PATH.read_text(encoding="utf-8")
+        keylayout_lines = [
+            line for line in keylayout.splitlines()
+            if line and not line.startswith("#")
+        ]
         self.assertEqual(
-            keylayout.splitlines(),
+            keylayout_lines,
             [
+                "key 331   BUTTON_7",
+                "key 332   BUTTON_8",
                 "key 262   BUTTON_7",
                 "key 263   BUTTON_8",
                 "key 264   BUTTON_9",
@@ -53,6 +66,8 @@ class SwitchSafetyTests(unittest.TestCase):
         for button in range(7, 11):
             self.assertIn(f"key BUTTON_{button} {{", keychars)
         self.assertEqual(keychars.count("base: none"), 4)
+        self.assertNotIn("STYLUS_BUTTON_PRIMARY", keylayout + keychars)
+        self.assertNotIn("STYLUS_BUTTON_SECONDARY", keylayout + keychars)
         for legacy in (
             "NUMPAD",
             "PAGE_UP",
@@ -66,6 +81,14 @@ class SwitchSafetyTests(unittest.TestCase):
         ):
             self.assertNotIn(legacy, keylayout + keychars)
 
+        pen_keylayout = PEN_KEYLAYOUT_PATH.read_text(encoding="utf-8")
+        pen_keychars = PEN_KEYCHARS_PATH.read_text(encoding="utf-8")
+        self.assertIn("key 331   BUTTON_7", pen_keylayout)
+        self.assertIn("key 332   BUTTON_8", pen_keylayout)
+        self.assertEqual(pen_keychars.count("base: none"), 2)
+        self.assertNotIn("STYLUS_BUTTON_PRIMARY", pen_keylayout + pen_keychars)
+        self.assertNotIn("STYLUS_BUTTON_SECONDARY", pen_keylayout + pen_keychars)
+
     def test_relay_contains_no_legacy_slide_translation(self):
         relay = RELAY_PATH.read_text(encoding="utf-8")
         self.assertNotIn("KEY_KP9", relay)
@@ -73,10 +96,72 @@ class SwitchSafetyTests(unittest.TestCase):
         self.assertNotIn("ANDROID_GESTURE_KEY_MAP", relay)
         self.assertNotIn("KEY_PROG", relay)
 
+    def test_pro_y_axis_normalizes_for_desktop_and_direct(self):
+        frame = b"".join(
+            (
+                RELAY.make_event(RELAY.EV_ABS, RELAY.ABS_Y, 600),
+                RELAY.make_event(RELAY.EV_SYN, RELAY.SYN_REPORT, 0),
+            )
+        )
+        desktop = RELAY.transform_pen_events(
+            frame,
+            ordinary=False,
+            source_y_min=600,
+            target_y_min=0,
+        )
+        desktop_y = RELAY.INPUT_EVENT.unpack_from(desktop)[4]
+        self.assertEqual(desktop_y, 0)
+
+        output = type(
+            "Output",
+            (),
+            {"release": lambda self: None, "write": lambda self, data: None},
+        )()
+        mapper = RELAY.AndroidFrameMapper(
+            output,
+            output_y_min=600,
+            source_y_min=600,
+        )
+        _, android_top = mapper._map_point(mapper.X_MAX // 2, 600)
+        _, android_bottom = mapper._map_point(mapper.X_MAX // 2, 20319)
+        self.assertEqual(android_top, 600)
+        self.assertEqual(android_bottom, 20319)
+
+    def test_ordinary_y_axis_stays_identity(self):
+        frame = b"".join(
+            (
+                RELAY.make_event(RELAY.EV_ABS, RELAY.ABS_Y, 600),
+                RELAY.make_event(RELAY.EV_SYN, RELAY.SYN_REPORT, 0),
+            )
+        )
+        desktop = RELAY.transform_pen_events(
+            frame,
+            ordinary=True,
+            source_y_min=0,
+            target_y_min=0,
+        )
+        self.assertEqual(RELAY.INPUT_EVENT.unpack_from(desktop)[4], 600)
+
+    def test_desktop_gesture_proxy_is_tagged_as_pointer_for_kwin(self):
+        rules = RULE_PATH.read_text(encoding="utf-8")
+        desktop_rule = next(
+            line for line in rules.splitlines()
+            if 'phys}=="waydroid-gesture-relay"' in line
+        )
+        self.assertIn('ENV{ID_INPUT_MOUSE}="1"', desktop_rule)
+
     def test_android_link_specs_keep_event4_and_event5_stable(self):
-        links = MODULE.android_links(dict(MODULE.DEFAULTS))
+        links = MODULE.android_links(
+            dict(MODULE.DEFAULTS),
+            {
+                "mode": "direct",
+                "active_pen": "p81c",
+                "pro_available": True,
+                "android_button_active": False,
+            },
+        )
         self.assertEqual(links[0]["link"], "/dev/input/event4")
-        self.assertEqual(links[0]["target"], "../waydroid_pen")
+        self.assertEqual(links[0]["target"], "../waydroid_pen_p81c")
         self.assertEqual(links[1]["link"], "/dev/input/event5")
         self.assertEqual(links[1]["target"], "../waydroid_pen_gesture")
 
@@ -174,7 +259,7 @@ class SwitchSafetyTests(unittest.TestCase):
         with self.assertRaisesRegex(MODULE.ModeError, "Android Pro state"):
             MODULE.android_pro_is_active({"android_pro_active": 1})
 
-    def test_ordinary_sync_creates_event4_only(self):
+    def test_ordinary_direct_sync_creates_model_event4_only(self):
         commands = []
 
         def shell(*arguments, **_kwargs):
@@ -188,12 +273,22 @@ class SwitchSafetyTests(unittest.TestCase):
             ),
             mock.patch.object(MODULE, "waydroid_shell", side_effect=shell),
         ):
-            MODULE.sync_android_links(dict(MODULE.DEFAULTS), True, False)
+            MODULE.sync_android_links(
+                dict(MODULE.DEFAULTS),
+                {
+                    "mode": "direct",
+                    "active_pen": "m80p",
+                    "pro_available": False,
+                    "android_button_active": False,
+                },
+            )
 
         link_commands = [command for command in commands if command[0] == "ln"]
         self.assertEqual(
             link_commands,
-            [("ln", "-s", "../waydroid_pen", "/dev/input/event4")],
+            [
+                ("ln", "-s", "../waydroid_pen_m80p", "/dev/input/event4"),
+            ],
         )
 
     def test_pro_sync_creates_event4_and_event5(self):
@@ -210,13 +305,21 @@ class SwitchSafetyTests(unittest.TestCase):
             ),
             mock.patch.object(MODULE, "waydroid_shell", side_effect=shell),
         ):
-            MODULE.sync_android_links(dict(MODULE.DEFAULTS), True, True)
+            MODULE.sync_android_links(
+                dict(MODULE.DEFAULTS),
+                {
+                    "mode": "direct",
+                    "active_pen": "p81c",
+                    "pro_available": True,
+                    "android_button_active": False,
+                },
+            )
 
         link_commands = [command for command in commands if command[0] == "ln"]
         self.assertEqual(
             link_commands,
             [
-                ("ln", "-s", "../waydroid_pen", "/dev/input/event4"),
+                ("ln", "-s", "../waydroid_pen_p81c", "/dev/input/event4"),
                 (
                     "ln",
                     "-s",
@@ -240,7 +343,15 @@ class SwitchSafetyTests(unittest.TestCase):
             ),
             mock.patch.object(MODULE, "waydroid_shell", side_effect=shell),
         ):
-            MODULE.sync_android_links(dict(MODULE.DEFAULTS), False, True)
+            MODULE.sync_android_links(
+                dict(MODULE.DEFAULTS),
+                {
+                    "mode": "desktop",
+                    "active_pen": "p81c",
+                    "pro_available": True,
+                    "android_button_active": False,
+                },
+            )
 
         link_commands = [command for command in commands if command[0] == "ln"]
         self.assertEqual(
@@ -255,7 +366,7 @@ class SwitchSafetyTests(unittest.TestCase):
             ],
         )
 
-    def test_pro_disconnect_removes_owned_event5(self):
+    def test_no_side_channel_removes_owned_event5(self):
         commands = []
 
         def shell(*arguments, **_kwargs):
@@ -269,10 +380,17 @@ class SwitchSafetyTests(unittest.TestCase):
             ),
             mock.patch.object(MODULE, "waydroid_shell", side_effect=shell),
         ):
-            MODULE.sync_android_links(dict(MODULE.DEFAULTS), True, False)
+            MODULE.sync_android_links(
+                dict(MODULE.DEFAULTS),
+                {
+                    "mode": "direct",
+                    "active_pen": "m80p",
+                    "pro_available": False,
+                    "android_button_active": False,
+                },
+            )
 
         self.assertIn(("unlink", "/dev/input/event5"), commands)
-        self.assertNotIn(("unlink", "/dev/input/event4"), commands)
 
     def test_foreign_event_link_is_rejected_before_mutation(self):
         with (
@@ -405,7 +523,10 @@ class SwitchSafetyTests(unittest.TestCase):
             "ok": True,
             "mode": "desktop",
             "pro_available": True,
+            "active_pen": "p81c",
+            "waydroid_focused": True,
             "android_pro_active": False,
+            "android_button_active": False,
             "capability_generation": 9,
         }
 
@@ -419,8 +540,8 @@ class SwitchSafetyTests(unittest.TestCase):
             mock.patch.object(
                 MODULE,
                 "sync_android_links",
-                side_effect=lambda _config, pen, pro: calls.append(
-                    ("links", pen, pro)
+                side_effect=lambda _config, state: calls.append(
+                    ("links", state["mode"], state["active_pen"], state["pro_available"])
                 ),
             ),
         ):
@@ -430,7 +551,7 @@ class SwitchSafetyTests(unittest.TestCase):
             calls,
             [
                 ("relay", "status"),
-                ("links", True, True),
+                ("links", "direct", "p81c", True),
                 ("relay", "status"),
                 ("relay", "direct 9 1"),
             ],
@@ -447,16 +568,20 @@ class SwitchSafetyTests(unittest.TestCase):
                         "ok": True,
                         "mode": "direct",
                         "pro_available": True,
+                        "active_pen": "p81c",
                         "waydroid_focused": True,
                         "android_pro_active": True,
+                        "android_button_active": False,
                         "capability_generation": 3,
                     },
                     {
                         "ok": True,
                         "mode": "direct",
                         "pro_available": True,
+                        "active_pen": "p81c",
                         "waydroid_focused": True,
                         "android_pro_active": True,
+                        "android_button_active": False,
                         "capability_generation": 3,
                     },
                 ],
@@ -464,7 +589,10 @@ class SwitchSafetyTests(unittest.TestCase):
             mock.patch.object(MODULE, "sync_android_links") as sync,
         ):
             MODULE.sync_mode(dict(MODULE.DEFAULTS))
-        sync.assert_called_once_with(dict(MODULE.DEFAULTS), True, True)
+        sync.assert_called_once()
+        self.assertEqual(sync.call_args.args[0], dict(MODULE.DEFAULTS))
+        self.assertEqual(sync.call_args.args[1]["active_pen"], "p81c")
+        self.assertEqual(sync.call_args.args[1]["mode"], "direct")
         self.assertEqual(relay.call_count, 2)
 
     def test_sync_disables_android_pro_when_container_is_stopped(self):
@@ -504,32 +632,40 @@ class SwitchSafetyTests(unittest.TestCase):
                         "ok": True,
                         "mode": "direct",
                         "pro_available": False,
+                        "active_pen": "m80p",
                         "waydroid_focused": True,
                         "android_pro_active": False,
+                        "android_button_active": False,
                         "capability_generation": 4,
                     },
                     {
                         "ok": True,
                         "mode": "direct",
                         "pro_available": True,
+                        "active_pen": "p81c",
                         "waydroid_focused": True,
                         "android_pro_active": False,
+                        "android_button_active": False,
                         "capability_generation": 5,
                     },
                     {
                         "ok": True,
                         "mode": "direct",
                         "pro_available": True,
+                        "active_pen": "p81c",
                         "waydroid_focused": True,
                         "android_pro_active": False,
+                        "android_button_active": False,
                         "capability_generation": 5,
                     },
                     {
                         "ok": True,
                         "mode": "direct",
                         "pro_available": True,
+                        "active_pen": "p81c",
                         "waydroid_focused": True,
                         "android_pro_active": True,
+                        "android_button_active": False,
                         "capability_generation": 5,
                     },
                 ],
@@ -539,9 +675,10 @@ class SwitchSafetyTests(unittest.TestCase):
             result_value = MODULE.sync_mode(config)
 
         self.assertTrue(result_value["android_pro_active"])
+        self.assertEqual(sync.call_count, 2)
         self.assertEqual(
-            sync.call_args_list,
-            [mock.call(config, True, False), mock.call(config, True, True)],
+            [call.args[1]["active_pen"] for call in sync.call_args_list],
+            ["m80p", "p81c"],
         )
 
     def test_sync_keeps_only_event5_for_pro_desktop(self):
@@ -549,8 +686,10 @@ class SwitchSafetyTests(unittest.TestCase):
             "ok": True,
             "mode": "desktop",
             "pro_available": True,
+            "active_pen": "p81c",
             "waydroid_focused": False,
             "android_pro_active": False,
+            "android_button_active": False,
             "capability_generation": 6,
         }
         with (
@@ -565,7 +704,7 @@ class SwitchSafetyTests(unittest.TestCase):
         ):
             MODULE.sync_mode(dict(MODULE.DEFAULTS))
         remove.assert_not_called()
-        sync.assert_called_once_with(dict(MODULE.DEFAULTS), False, True)
+        sync.assert_called_once_with(dict(MODULE.DEFAULTS), relay_state)
 
     def test_mapping_is_validated_before_reaching_relay(self):
         with mock.patch.object(MODULE, "relay_command") as relay_command:
@@ -624,8 +763,10 @@ class SwitchSafetyTests(unittest.TestCase):
             "ok": True,
             "mode": "desktop",
             "pro_available": True,
+            "active_pen": "p81c",
             "waydroid_focused": False,
             "android_pro_active": False,
+            "android_button_active": False,
             "capability_generation": 9,
         }
         focused = dict(
@@ -644,6 +785,13 @@ class SwitchSafetyTests(unittest.TestCase):
             mock.patch.object(MODULE, "relay_command", side_effect=relay),
             mock.patch.object(
                 MODULE,
+                "sync_android_links",
+                side_effect=lambda _config, state: calls.append(
+                    ("preflight", state["waydroid_focused"])
+                ),
+            ),
+            mock.patch.object(
+                MODULE,
                 "reconcile_android_links",
                 side_effect=lambda _config, state: calls.append(
                     ("links", state["waydroid_focused"])
@@ -657,7 +805,7 @@ class SwitchSafetyTests(unittest.TestCase):
             calls,
             [
                 ("relay", "status"),
-                ("links", False),
+                ("preflight", True),
                 ("relay", "focus 1"),
                 ("links", True),
             ],
@@ -669,8 +817,10 @@ class SwitchSafetyTests(unittest.TestCase):
             "ok": True,
             "mode": "desktop",
             "pro_available": True,
+            "active_pen": "p81c",
             "waydroid_focused": False,
             "android_pro_active": False,
+            "android_button_active": False,
             "capability_generation": 9,
         }
         with (
@@ -680,7 +830,7 @@ class SwitchSafetyTests(unittest.TestCase):
             ) as relay,
             mock.patch.object(
                 MODULE,
-                "reconcile_android_links",
+                "sync_android_links",
                 side_effect=MODULE.ModeError("event5 unavailable"),
             ),
         ):
@@ -694,8 +844,10 @@ class SwitchSafetyTests(unittest.TestCase):
             "ok": True,
             "mode": "desktop",
             "pro_available": True,
+            "active_pen": "p81c",
             "waydroid_focused": True,
             "android_pro_active": True,
+            "android_button_active": False,
             "capability_generation": 9,
         }
         unfocused = dict(
@@ -709,8 +861,10 @@ class SwitchSafetyTests(unittest.TestCase):
                 "relay_command",
                 side_effect=[focused, unfocused],
             ) as relay,
-            mock.patch.object(MODULE, "waydroid_running") as running,
-            mock.patch.object(MODULE, "reconcile_android_links") as reconcile,
+            mock.patch.object(MODULE, "waydroid_running", return_value=True),
+            mock.patch.object(
+                MODULE, "reconcile_android_links", return_value=unfocused
+            ) as reconcile,
         ):
             result_value = MODULE.focus_mode(config, False)
 
@@ -719,8 +873,7 @@ class SwitchSafetyTests(unittest.TestCase):
             relay.call_args_list,
             [mock.call(config, "status"), mock.call(config, "focus 0")],
         )
-        running.assert_not_called()
-        reconcile.assert_not_called()
+        reconcile.assert_called_once_with(config, unfocused)
 
     def test_integration_files_cover_optional_pro_lifecycle(self):
         install = INSTALL_PATH.read_text(encoding="utf-8")
@@ -754,7 +907,15 @@ class SwitchSafetyTests(unittest.TestCase):
         self.assertIn('ATTRS{id/product}=="5081"', rules)
         self.assertIn('ATTRS{phys}=="waydroid-gesture-android"', rules)
         self.assertIn("Xiaomi Focus Pen Pro Gestures", rules)
-        self.assertIn("waydroid-android-gestures", service)
+        self.assertIn('phys}=="waydroid-pen-m80p"', rules)
+        self.assertIn('phys}=="waydroid-pen-p81c"', rules)
+        self.assertIn('phys}=="waydroid-android-pen-m80p"', rules)
+        self.assertIn('phys}=="waydroid-android-pen-p81c"', rules)
+        self.assertIn('ENV{LIBINPUT_IGNORE_DEVICE}="1"', rules)
+        self.assertIn("waydroid-android-pen-m80p", service)
+        self.assertIn("waydroid-android-pen-p81c", service)
+        self.assertIn("waydroid-android-buttons", service)
+        self.assertNotIn("-e /dev/input/waydroid-android-gestures", service)
         self.assertNotIn("waydroid-pen-gestures", service)
         self.assertNotIn("-e /dev/input/waydroid-pen ", service)
         self.assertIn(
@@ -769,14 +930,22 @@ class SwitchSafetyTests(unittest.TestCase):
         self.assertNotIn("sudo", extension)
         self.assertNotIn("capability_generation", extension)
         self.assertIn("Main.overview.connectObject", extension)
-        self.assertIn("PathChanged=/run/waydroid-pen-mode/state.json", link_path)
+        self.assertIn(
+            "PathChanged=/run/waydroid-pen-mode/link-state.json",
+            link_path,
+        )
         self.assertIn("BindsTo=waydroid-pen-relay.service", link_path)
         self.assertIn("Requisite=waydroid-pen-relay.service", link_service)
         self.assertIn("waydroid-pen-mode sync", link_service)
+        self.assertNotIn("StartLimitIntervalSec=0", link_path + link_service)
+        self.assertIn(
+            "ExecStartPost=-/usr/local/libexec/waydroid-pen-mode sync",
+            service,
+        )
         self.assertIn("waydroid-pen-session apply %i", user_session)
         self.assertIn("waydroid-pen-session reapply", user_reapply)
         self.assertIn(
-            "PathChanged=/run/waydroid-pen-mode/state.json",
+            "PathChanged=/run/waydroid-pen-mode/link-state.json",
             user_reapply_path,
         )
         self.assertIn("stale desktop context generation", session)
@@ -798,6 +967,7 @@ class SwitchSafetyTests(unittest.TestCase):
         self.assertIn('widget.currentConfigGroup = ["General"]', uninstall)
         self.assertIn("waydroid-pen-session@.service", uninstall)
         self.assertIn("waydroid-pen-session.path", install)
+        self.assertIn("reset-failed", install)
         self.assertIn("waydroid-pen-session.path", uninstall)
         self.assertNotIn("waydroid shell", install + uninstall)
         self.assertIn("/usr/bin/lxc-info", install)
