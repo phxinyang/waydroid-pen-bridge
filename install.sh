@@ -28,11 +28,6 @@ SUDOERS_PATH=/etc/sudoers.d/waydroid-pen-mode
 INSTALL_USER=${SUDO_USER:-$USER}
 INSTALL_UID=$(id -u "$INSTALL_USER")
 INSTALL_HOME=$(getent passwd "$INSTALL_USER" | cut -d: -f6)
-EXTENSION_DIR="$INSTALL_HOME/.local/share/gnome-shell/extensions/$UUID"
-POLICY_DIR="$INSTALL_HOME/.config/waydroid-pen-mode"
-USER_UNIT_DIR="$INSTALL_HOME/.config/systemd/user"
-KWIN_ID=waydroid-pen-mode
-PLASMOID_ID=org.xinyang.waydroidpenmode
 
 if [[ -z "$INSTALL_HOME" || "$INSTALL_HOME" != /* || "$INSTALL_HOME" == / ]]; then
     echo "Invalid install home for $INSTALL_USER: $INSTALL_HOME" >&2
