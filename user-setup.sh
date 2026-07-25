@@ -7,7 +7,17 @@ ROOT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 UUID=waydroid-pen-mode@sheng
 KWIN_ID=waydroid-pen-mode
 PLASMOID_ID=org.xinyang.waydroidpenmode
-INSTALL_USER=${SUDO_USER:-$USER}
+# Prefer the real login user.  When root runs `sudo -u alice`, SUDO_USER is often
+# still "root"; never install UI into /root in that case.
+if [[ -n "${SUDO_USER:-}" && "${SUDO_USER}" != root ]]; then
+    INSTALL_USER=$SUDO_USER
+else
+    INSTALL_USER=$USER
+fi
+if [[ "$INSTALL_USER" == root ]]; then
+    echo "Refusing to configure desktop UI for root; run as the desktop user." >&2
+    exit 1
+fi
 INSTALL_HOME=$(getent passwd "$INSTALL_USER" | cut -d: -f6)
 EXTENSION_DIR="$INSTALL_HOME/.local/share/gnome-shell/extensions/$UUID"
 POLICY_DIR="$INSTALL_HOME/.config/waydroid-pen-mode"
