@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+PACKAGE_NAME=waydroid-pen-bridge
 UUID=waydroid-pen-mode@sheng
 HELPER=/usr/local/libexec/waydroid-pen-mode
 SESSION=/usr/local/libexec/waydroid-pen-session
@@ -18,10 +19,23 @@ ANDROID_PATH=/system/bin:/system/xbin
 RULE_PATH=/etc/udev/rules.d/99-waydroid-pen-mode.rules
 LEGACY_RULE_PATH=/etc/udev/rules.d/99-waydroid-evdev-pen.rules
 LEGACY_RULE_DISABLED=/etc/udev/rules.d/99-waydroid-evdev-pen.rules.disabled-by-waydroid-pen-mode
-INSTALL_USER=${SUDO_USER:-$USER}
-INSTALL_HOME=$(getent passwd "$INSTALL_USER" | cut -d: -f6)
 KWIN_ID=waydroid-pen-mode
 PLASMOID_ID=org.xinyang.waydroidpenmode
+
+# Prefer the real login user (same rule as user-setup.sh).
+if [[ -n "${SUDO_USER:-}" && "${SUDO_USER}" != root ]]; then
+    INSTALL_USER=$SUDO_USER
+else
+    INSTALL_USER=$USER
+fi
+if [[ "$INSTALL_USER" == root ]]; then
+    INSTALL_USER=$(loginctl list-sessions --no-legend 2>/dev/null \
+        | awk '($3 ~ /^seat/) { print $4; exit }' || true)
+fi
+if [[ -z "$INSTALL_USER" || "$INSTALL_USER" == root ]]; then
+    INSTALL_USER=$(getent passwd 1000 | cut -d: -f1 || echo "$USER")
+fi
+INSTALL_HOME=$(getent passwd "$INSTALL_USER" | cut -d: -f6)
 
 if [[ -z "$INSTALL_HOME" || "$INSTALL_HOME" != /* || "$INSTALL_HOME" == / ]]; then
     echo "Invalid install home for $INSTALL_USER: $INSTALL_HOME" >&2
@@ -42,6 +56,204 @@ waydroid_container_shell() {
         --clear-env --set-var "PATH=$ANDROID_PATH" -- \
         /system/bin/sh -c 'exec "$@"' waydroid-pen-uninstall "$@"
 }
+
+detect_package_install() {
+    if command -v rpm >/dev/null 2>&1 \
+            && rpm -q "$PACKAGE_NAME" >/dev/null 2>&1; then
+        echo rpm
+        return
+    fi
+    if command -v dpkg-query >/dev/null 2>&1; then
+        local status
+        status=$(dpkg-query -W -f='${Status}' "$PACKAGE_NAME" 2>/dev/null || true)
+        if [[ "$status" == *"install ok installed"* ]]; then
+            echo deb
+            return
+        fi
+    fi
+    echo none
+}
+
+remove_user_ui() {
+    gnome-extensions disable "$UUID" >/dev/null 2>&1 || true
+    systemctl --user disable --now waydroid-pen-session.path \
+        >/dev/null 2>&1 || true
+    systemctl --user stop waydroid-pen-session-reapply.service \
+        >/dev/null 2>&1 || true
+
+    if command -v gdbus >/dev/null 2>&1; then
+        plasma_script='const widgetName = "org.xinyang.waydroidpenmode"; for (const panelId of panelIds) { const panel = panelById(panelId); if (!panel) continue; for (const widgetId of panel.widgetIds) { const widget = panel.widgetById(widgetId); if (!widget || widget.type !== "org.kde.plasma.systemtray") continue; widget.currentConfigGroup = ["General"]; for (const key of ["extraItems", "shownItems", "hiddenItems"]) { const items = String(widget.readConfig(key) || "").split(",").filter(item => item.length > 0 && item !== widgetName); widget.writeConfig(key, items); } widget.reloadConfig(); } }'
+        gdbus call --session --dest org.kde.plasmashell \
+            --object-path /PlasmaShell \
+            --method org.kde.PlasmaShell.evaluateScript "$plasma_script" \
+            >/dev/null 2>&1 || true
+        gdbus call --session --dest org.kde.KWin --object-path /Scripting \
+            --method org.kde.kwin.Scripting.unloadScript "$KWIN_ID" \
+            >/dev/null 2>&1 || true
+    fi
+    if command -v kwriteconfig6 >/dev/null 2>&1; then
+        kwriteconfig6 --file kwinrc --group Plugins \
+            --key "${KWIN_ID}Enabled" --delete >/dev/null 2>&1 || true
+    fi
+    if command -v kpackagetool6 >/dev/null 2>&1; then
+        kpackagetool6 --type Plasma/Applet --remove "$PLASMOID_ID" \
+            >/dev/null 2>&1 || true
+        kpackagetool6 --type KWin/Script --remove "$KWIN_ID" \
+            >/dev/null 2>&1 || true
+    fi
+    # Hard-remove package trees if kpackagetool left anything behind.
+    rm -rf \
+        "$INSTALL_HOME/.local/share/plasma/plasmoids/$PLASMOID_ID" \
+        "$INSTALL_HOME/.local/share/kwin/scripts/$KWIN_ID" \
+        "$INSTALL_HOME/.local/share/gnome-shell/extensions/$UUID"
+    rm -f \
+        "$INSTALL_HOME/.config/systemd/user/waydroid-pen-session@.service" \
+        "$INSTALL_HOME/.config/systemd/user/waydroid-pen-session-reapply.service" \
+        "$INSTALL_HOME/.config/systemd/user/waydroid-pen-session.path" \
+        "$INSTALL_HOME/.config/waydroid-pen-mode/policy" \
+        "$INSTALL_HOME/.local/state/waydroid-pen-mode/session.json"
+    rmdir "$INSTALL_HOME/.config/waydroid-pen-mode" 2>/dev/null || true
+    rmdir "$INSTALL_HOME/.local/state/waydroid-pen-mode" 2>/dev/null || true
+    systemctl --user daemon-reload 2>/dev/null || true
+}
+
+path_status() {
+    local path=$1
+    if [[ -e "$path" || -L "$path" ]]; then
+        echo "STILL $path"
+        return 1
+    fi
+    echo "gone  $path"
+    return 0
+}
+
+verify_clean() {
+    local failed=0
+    echo "=== uninstall verification ==="
+    path_status "$HELPER" || failed=1
+    path_status /usr/local/libexec/waydroid-pen-relay || failed=1
+    path_status "$SESSION" || failed=1
+    path_status /usr/local/bin/waydroid-pen-bridge-user-setup || failed=1
+    path_status /usr/local/share/waydroid-pen-bridge || failed=1
+    path_status "$RULE_PATH" || failed=1
+    path_status "$LEGACY_RULE_PATH" || failed=1
+    path_status /etc/sudoers.d/waydroid-pen-mode || failed=1
+    path_status /usr/lib/systemd/system/waydroid-pen-relay.service || failed=1
+    path_status /etc/systemd/system/waydroid-pen-relay.service || failed=1
+    path_status /etc/waydroid-pen-mode.conf || failed=1
+    path_status "$INSTALL_HOME/.local/share/plasma/plasmoids/$PLASMOID_ID" || failed=1
+    path_status "$INSTALL_HOME/.local/share/kwin/scripts/$KWIN_ID" || failed=1
+    path_status "$INSTALL_HOME/.local/share/gnome-shell/extensions/$UUID" || failed=1
+
+    if command -v rpm >/dev/null 2>&1 && rpm -q "$PACKAGE_NAME" >/dev/null 2>&1; then
+        echo "STILL rpm package $PACKAGE_NAME"
+        failed=1
+    else
+        echo "gone  rpm package record (or n/a)"
+    fi
+    if command -v dpkg-query >/dev/null 2>&1; then
+        local status
+        status=$(dpkg-query -W -f='${Status}' "$PACKAGE_NAME" 2>/dev/null || true)
+        if [[ "$status" == *"install ok installed"* ]]; then
+            echo "STILL deb package $PACKAGE_NAME"
+            failed=1
+        else
+            echo "gone  deb package record (or n/a)"
+        fi
+    fi
+
+    if systemctl is-active --quiet waydroid-pen-relay.service 2>/dev/null; then
+        echo "STILL waydroid-pen-relay.service active"
+        failed=1
+    else
+        echo "gone  waydroid-pen-relay.service (inactive/missing)"
+    fi
+
+    local proxy
+    for proxy in /dev/input/waydroid-pen /dev/input/waydroid-pen-pro \
+            /dev/input/waydroid-android-pen-m80p /dev/input/waydroid-android-pen-p81c; do
+        if [[ -e "$proxy" || -L "$proxy" ]]; then
+            echo "STILL $proxy"
+            failed=1
+        fi
+    done
+
+    local event_path device_name phys ignore
+    shopt -s nullglob
+    for event_path in /sys/class/input/event*; do
+        device_name=$(cat "$event_path/device/name" 2>/dev/null || true)
+        phys=$(cat "$event_path/device/phys" 2>/dev/null || true)
+        if [[ ( "$device_name" == "NVTCapacitivePenM80p" && "$phys" == "input/pen" ) \
+                || ( "$device_name" == "NVTCapacitivePenP81c" && "$phys" == "input/pen_p81c" ) \
+                || ( "$device_name" == "Xiaomi Focus Pen Pro Gestures" && "$phys" == "input/pen_p81c/gestures" ) ]]; then
+            ignore=$(udevadm info -q property -p "$event_path" 2>/dev/null \
+                | grep '^LIBINPUT_IGNORE_DEVICE=' || true)
+            if [[ "$ignore" == *"=1"* ]]; then
+                echo "STILL LIBINPUT_IGNORE on $device_name ($phys)"
+                failed=1
+            else
+                echo "ok    $device_name ignore cleared"
+            fi
+        fi
+    done
+
+    if systemctl cat xiaomi-sheng-thp.service >/dev/null 2>&1; then
+        if systemctl is-active --quiet xiaomi-sheng-thp.service; then
+            echo "ok    xiaomi-sheng-thp is left installed (active)"
+        else
+            echo "warn  xiaomi-sheng-thp unit present but not active"
+        fi
+    fi
+
+    if [[ "$failed" -ne 0 ]]; then
+        echo "Verification found leftovers (see STILL lines above)." >&2
+        return 1
+    fi
+    echo "Verification passed."
+    return 0
+}
+
+remove_via_package_manager() {
+    local kind=$1
+    echo "Detected $kind install of $PACKAGE_NAME; removing with package manager..."
+    case "$kind" in
+        rpm)
+            if command -v dnf >/dev/null 2>&1; then
+                sudo dnf remove -y "$PACKAGE_NAME"
+            else
+                sudo rpm -e "$PACKAGE_NAME"
+            fi
+            ;;
+        deb)
+            if command -v apt-get >/dev/null 2>&1; then
+                sudo DEBIAN_FRONTEND=noninteractive apt-get remove -y "$PACKAGE_NAME"
+            else
+                sudo dpkg -r "$PACKAGE_NAME"
+            fi
+            ;;
+        *)
+            echo "Unknown package kind: $kind" >&2
+            exit 1
+            ;;
+    esac
+}
+
+# --- entry ---
+
+PKG_KIND=$(detect_package_install)
+
+if [[ "$PKG_KIND" != none ]]; then
+    remove_via_package_manager "$PKG_KIND"
+    remove_user_ui
+    echo "Uninstalled waydroid-pen-bridge via $PKG_KIND."
+    echo "xiaomi-sheng-thp is left installed."
+    echo "Physical THP pen nodes should be visible to libinput again."
+    echo "Reboot still recommended so every desktop session fully rediscovers them."
+    verify_clean
+    exit 0
+fi
+
+# --- script / install.sh install path ---
 
 gnome-extensions disable "$UUID" >/dev/null 2>&1 || true
 systemctl --user disable --now waydroid-pen-session.path \
@@ -78,30 +290,7 @@ if waydroid_container_available; then
     fi
 fi
 
-if command -v gdbus >/dev/null 2>&1; then
-    plasma_script='const widgetName = "org.xinyang.waydroidpenmode"; for (const panelId of panelIds) { const panel = panelById(panelId); if (!panel) continue; for (const widgetId of panel.widgetIds) { const widget = panel.widgetById(widgetId); if (!widget || widget.type !== "org.kde.plasma.systemtray") continue; widget.currentConfigGroup = ["General"]; for (const key of ["extraItems", "shownItems", "hiddenItems"]) { const items = String(widget.readConfig(key) || "").split(",").filter(item => item.length > 0 && item !== widgetName); widget.writeConfig(key, items); } widget.reloadConfig(); } }'
-    gdbus call --session --dest org.kde.plasmashell \
-        --object-path /PlasmaShell \
-        --method org.kde.PlasmaShell.evaluateScript "$plasma_script" \
-        >/dev/null 2>&1 || true
-    gdbus call --session --dest org.kde.KWin --object-path /Scripting \
-        --method org.kde.kwin.Scripting.unloadScript "$KWIN_ID" \
-        >/dev/null 2>&1 || true
-fi
-if command -v kwriteconfig6 >/dev/null 2>&1; then
-    kwriteconfig6 --file kwinrc --group Plugins \
-        --key "${KWIN_ID}Enabled" --delete >/dev/null 2>&1 || true
-fi
-if command -v kpackagetool6 >/dev/null 2>&1; then
-    kpackagetool6 --type Plasma/Applet --remove "$PLASMOID_ID" \
-        >/dev/null 2>&1 || true
-    kpackagetool6 --type KWin/Script --remove "$KWIN_ID" \
-        >/dev/null 2>&1 || true
-fi
-# Hard-remove package trees if kpackagetool left anything behind.
-rm -rf \
-    "$INSTALL_HOME/.local/share/plasma/plasmoids/$PLASMOID_ID" \
-    "$INSTALL_HOME/.local/share/kwin/scripts/$KWIN_ID"
+remove_user_ui
 
 if [[ -f "$LXC_CONFIG" ]] && {
     grep -Fqx "$M80P_LXC_LINE" "$LXC_CONFIG" \
@@ -132,8 +321,13 @@ sudo rm -f \
     /etc/systemd/system/waydroid-pen-link-sync.service \
     /etc/systemd/system/waydroid-pen-relay.service \
     /etc/systemd/system/waydroid-container.service.d/90-pen-relay.conf \
+    /usr/lib/systemd/system/waydroid-pen-link-sync.path \
+    /usr/lib/systemd/system/waydroid-pen-link-sync.service \
+    /usr/lib/systemd/system/waydroid-pen-relay.service \
+    /usr/lib/systemd/system/waydroid-container.service.d/90-pen-relay.conf \
     /etc/waydroid-pen-mode.conf \
     /usr/local/libexec/waydroid-pen-relay \
+    /usr/local/bin/waydroid-pen-bridge-user-setup \
     "$SESSION" \
     "$ANDROID_OVERLAY/keylayout/Vendor_2717_Product_3654.kl" \
     "$ANDROID_OVERLAY/keychars/Vendor_2717_Product_3654.kcm" \
@@ -151,7 +345,9 @@ sudo rm -f \
     "$ANDROID_OVERLAY/idc/NVTCapacitivePenM80p.idc" \
     "$ANDROID_OVERLAY/idc/NVTCapacitivePenP81c.idc" \
     "$ANDROID_OVERLAY/idc/Vendor_2717_Product_3655.idc"
+sudo rm -rf /usr/local/share/waydroid-pen-bridge
 sudo rmdir /etc/systemd/system/waydroid-container.service.d 2>/dev/null || true
+sudo rmdir /usr/lib/systemd/system/waydroid-container.service.d 2>/dev/null || true
 sudo rmdir /run/waydroid-pen-mode 2>/dev/null || true
 
 # Never restore the pre-bridge ignore rule.  That legacy file tags the
@@ -159,16 +355,7 @@ sudo rmdir /run/waydroid-pen-mode 2>/dev/null || true
 # on the desktop after uninstall.  Delete both live and renamed copies.
 sudo rm -f "$LEGACY_RULE_PATH" "$LEGACY_RULE_DISABLED"
 
-rm -rf "$INSTALL_HOME/.local/share/gnome-shell/extensions/$UUID"
-rm -f \
-    "$INSTALL_HOME/.config/systemd/user/waydroid-pen-session@.service" \
-    "$INSTALL_HOME/.config/systemd/user/waydroid-pen-session-reapply.service" \
-    "$INSTALL_HOME/.config/systemd/user/waydroid-pen-session.path" \
-    "$INSTALL_HOME/.config/waydroid-pen-mode/policy" \
-    "$INSTALL_HOME/.local/state/waydroid-pen-mode/session.json"
-rmdir "$INSTALL_HOME/.config/waydroid-pen-mode" 2>/dev/null || true
-rmdir "$INSTALL_HOME/.local/state/waydroid-pen-mode" 2>/dev/null || true
-systemctl --user daemon-reload
+systemctl --user daemon-reload 2>/dev/null || true
 sudo systemctl daemon-reload
 
 # udev keeps previously assigned properties on live nodes until a rule clears
@@ -224,3 +411,4 @@ echo "Uninstalled waydroid-pen-bridge."
 echo "xiaomi-sheng-thp is left installed; it was restarted to restore clean pen nodes."
 echo "Physical THP pen nodes should be visible to libinput again."
 echo "Reboot still recommended so every desktop session fully rediscovers them."
+verify_clean
