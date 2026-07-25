@@ -1,0 +1,2 @@
+#!/usr/bin/env bash
+exec /usr/local/share/waydroid-pen-bridge/user-setup.sh "$@"

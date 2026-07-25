@@ -42,21 +42,43 @@ Android keylayout 只负责传输转换：普通笔或 M80p/P81c 笔节点的扫
 
 ## 安装
 
+### GitHub Release（RPM / DEB）
+
+打 `v*` 标签后，GitHub Actions 会构建包并挂到
+[Releases](https://github.com/phxinyang/waydroid-pen-bridge/releases)。
+
+```bash
+# Fedora 等
+sudo dnf install ./waydroid-pen-bridge-*.noarch.rpm
+
+# Debian / Ubuntu
+sudo apt install ./waydroid-pen-bridge_*.deb
+```
+
+图形登录后若没有托盘/扩展：
+
+```bash
+waydroid-pen-bridge-user-setup
+```
+
+### 源码安装
+
 ```bash
 ./install.sh
 ```
 
-`install.sh` 需要已有 Waydroid LXC 配置，以及已安装的
+两种方式都需要已有 Waydroid LXC 配置，以及
 [`xiaomi-sheng-thp`](https://github.com/ianchb/xiaomi-sheng-thp)。
-它不会替换或卸载 THP 驱动，只是让 libinput 忽略驱动节点，并通过稳定代理转发。
+不会替换或卸载 THP，只是让 libinput 忽略驱动节点，并通过稳定代理转发。
 
-安装后重启一次。重启可以让 udev 在桌面登录前隐藏物理触控笔，并让 relay 创建稳定代理。
+安装后建议重启一次，以便 udev 在登录前隐藏物理笔，并让 relay 建好代理。
 
-桌面 UI（GNOME 扩展 / KDE 托盘）由 `user-setup.sh` 配置，`install.sh` 也会调用它。
-若登录后看不到模式切换面板：
+桌面 UI 由 `user-setup.sh` / `waydroid-pen-bridge-user-setup` 配置。
+若登录后没有模式切换面板：
 
 ```bash
 ./user-setup.sh
+# 或：waydroid-pen-bridge-user-setup
 ```
 
 GNOME 可再启用 `Waydroid Pen Mode`；KDE 可在系统托盘 → 条目里把 Waydroid Pen Mode 设为显示。

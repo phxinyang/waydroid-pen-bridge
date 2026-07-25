@@ -86,24 +86,47 @@ other application-specific actions.
 
 ## Install
 
+### From GitHub Release (RPM / DEB)
+
+Packages are built by GitHub Actions on version tags (`v*`) and attached to the
+[Releases](https://github.com/phxinyang/waydroid-pen-bridge/releases) page.
+
+```bash
+# Fedora / RHEL-like
+sudo dnf install ./waydroid-pen-bridge-*.noarch.rpm
+
+# Debian / Ubuntu
+sudo apt install ./waydroid-pen-bridge_*.deb
+```
+
+Then, after graphical login (if the tray / extension is missing):
+
+```bash
+waydroid-pen-bridge-user-setup
+```
+
+### From source
+
 ```bash
 ./install.sh
 ```
 
-`install.sh` requires Waydroid's LXC config and the
-[`xiaomi-sheng-thp`](https://github.com/ianchb/xiaomi-sheng-thp) unit. It does
-not replace or uninstall that driver; it only hides the driver nodes from
-libinput and routes them through stable proxies.
+Both paths require Waydroid's LXC config and the
+[`xiaomi-sheng-thp`](https://github.com/ianchb/xiaomi-sheng-thp) unit. The
+bridge does not replace or uninstall that driver; it only hides the driver
+nodes from libinput and routes them through stable proxies.
 
 Reboot once after installation. The reboot lets udev hide the physical pen
 before the desktop starts and lets the relay create the stable proxy before
 login.
 
-Desktop UI (GNOME extension / KDE tray) is configured by `user-setup.sh`, which
-`install.sh` also calls. If the mode switch panel is missing after login:
+Desktop UI (GNOME extension / KDE tray) is configured by `user-setup.sh`
+(`waydroid-pen-bridge-user-setup` when installed from a package). `install.sh`
+also calls it. If the mode switch panel is missing after login:
 
 ```bash
 ./user-setup.sh
+# or: waydroid-pen-bridge-user-setup
 ```
 
 On GNOME, enable `Waydroid Pen Mode` if needed. On KDE, check System Tray →
