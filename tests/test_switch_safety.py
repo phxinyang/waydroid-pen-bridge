@@ -930,6 +930,9 @@ class SwitchSafetyTests(unittest.TestCase):
         self.assertIn("disabled-by-waydroid-pen-mode", uninstall)
         self.assertIn("xiaomi-sheng-thp is left installed", uninstall)
         self.assertIn("systemctl restart xiaomi-sheng-thp.service", uninstall)
+        # Must delete, not restore, the legacy M80p-ignore rule.
+        self.assertIn('rm -f "$LEGACY_RULE_PATH" "$LEGACY_RULE_DISABLED"', uninstall)
+        self.assertNotIn("mv \"$LEGACY_RULE_DISABLED\" \"$LEGACY_RULE_PATH\"", uninstall)
         self.assertNotIn("systemctl disable xiaomi-sheng-thp", uninstall)
         self.assertNotIn("systemctl stop xiaomi-sheng-thp", uninstall)
         self.assertNotIn("systemctl disable --now xiaomi-sheng-thp", uninstall)

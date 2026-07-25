@@ -150,10 +150,10 @@ sudo rm -f \
 sudo rmdir /etc/systemd/system/waydroid-container.service.d 2>/dev/null || true
 sudo rmdir /run/waydroid-pen-mode 2>/dev/null || true
 
-# Restore any pre-bridge udev rule that install renamed aside.
-if sudo test -e "$LEGACY_RULE_DISABLED" && ! sudo test -e "$LEGACY_RULE_PATH"; then
-    sudo mv "$LEGACY_RULE_DISABLED" "$LEGACY_RULE_PATH"
-fi
+# Never restore the pre-bridge ignore rule.  That legacy file tags the
+# physical M80p with LIBINPUT_IGNORE_DEVICE=1 and would leave THP unusable
+# on the desktop after uninstall.  Delete both live and renamed copies.
+sudo rm -f "$LEGACY_RULE_PATH" "$LEGACY_RULE_DISABLED"
 
 rm -rf "$INSTALL_HOME/.local/share/gnome-shell/extensions/$UUID"
 rm -f \
