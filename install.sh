@@ -44,6 +44,16 @@ if [[ ! -f "$LXC_CONFIG" ]]; then
     exit 1
 fi
 
+if ! systemctl cat xiaomi-sheng-thp.service >/dev/null 2>&1; then
+    echo "Missing required unit: xiaomi-sheng-thp.service" >&2
+    echo "Install and start https://github.com/ianchb/xiaomi-sheng-thp first." >&2
+    exit 1
+fi
+if ! systemctl is-active --quiet xiaomi-sheng-thp.service; then
+    echo "xiaomi-sheng-thp.service is installed but not active." >&2
+    echo "Start it before installing the bridge, or reboot after install." >&2
+fi
+
 waydroid_container_available() {
     local state
     state=$(sudo /usr/bin/timeout --kill-after=1s 5s \
@@ -250,10 +260,16 @@ sudo systemctl reset-failed \
     waydroid-pen-link-sync.path >/dev/null 2>&1 || true
 sudo systemctl enable \
     waydroid-pen-relay.service waydroid-pen-link-sync.path >/dev/null
-if sudo systemctl is-active --quiet waydroid-pen-relay.service; then
+if systemctl is-active --quiet xiaomi-sheng-thp.service; then
+    sudo systemctl restart waydroid-pen-relay.service
+    sudo systemctl restart waydroid-pen-link-sync.path
+elif sudo systemctl is-active --quiet waydroid-pen-relay.service; then
     sudo systemctl restart waydroid-pen-link-sync.path
 fi
 
-echo "Installed. Restart Waydroid, then reboot once so the desktop starts with the stable proxy."
+echo "Installed waydroid-pen-bridge."
+echo "Prerequisite: xiaomi-sheng-thp remains the pen driver; this package only routes it."
+echo "Restart Waydroid, then reboot once so udev hides the physical pen before login"
+echo "and the relay creates stable proxies."
 echo "On GNOME, enable the Waydroid Pen Mode extension."
 echo "On KDE, the Waydroid Pen Mode item is available in the System Tray."

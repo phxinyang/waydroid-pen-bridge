@@ -15,6 +15,9 @@ ANDROID_OVERLAY=/var/lib/waydroid/overlay/system/usr
 LXC_PATH=/var/lib/waydroid/lxc
 LXC_NAME=waydroid
 ANDROID_PATH=/system/bin:/system/xbin
+RULE_PATH=/etc/udev/rules.d/99-waydroid-pen-mode.rules
+LEGACY_RULE_PATH=/etc/udev/rules.d/99-waydroid-evdev-pen.rules
+LEGACY_RULE_DISABLED=/etc/udev/rules.d/99-waydroid-evdev-pen.rules.disabled-by-waydroid-pen-mode
 INSTALL_USER=${SUDO_USER:-$USER}
 INSTALL_HOME=$(getent passwd "$INSTALL_USER" | cut -d: -f6)
 KWIN_ID=waydroid-pen-mode
@@ -43,12 +46,25 @@ waydroid_container_shell() {
 gnome-extensions disable "$UUID" >/dev/null 2>&1 || true
 systemctl --user disable --now waydroid-pen-session.path \
     >/dev/null 2>&1 || true
+systemctl --user stop waydroid-pen-session-reapply.service \
+    >/dev/null 2>&1 || true
+
+# Prefer a clean desktop handoff while the helper still exists, then stop the
+# relay so uinput proxies disappear before udev restores the physical pen.
 if [[ -x "$HELPER" ]] && sudo systemctl is-active --quiet waydroid-pen-relay.service; then
     sudo "$HELPER" desktop || true
 fi
-sudo systemctl disable \
-    waydroid-pen-link-sync.path waydroid-pen-relay.service \
+sudo systemctl disable --now \
+    waydroid-pen-link-sync.path \
+    waydroid-pen-link-sync.service \
+    waydroid-pen-relay.service \
     >/dev/null 2>&1 || true
+sudo systemctl reset-failed \
+    waydroid-pen-link-sync.path \
+    waydroid-pen-link-sync.service \
+    waydroid-pen-relay.service \
+    >/dev/null 2>&1 || true
+
 if waydroid_container_available; then
     waydroid_container_shell setprop \
         persist.device_config.input_native_boot.palm_rejection_enabled '' || true
@@ -63,7 +79,7 @@ if waydroid_container_available; then
 fi
 
 if command -v gdbus >/dev/null 2>&1; then
-    plasma_script='const widgetName = "org.xinyang.waydroidpenmode"; for (const panelId of panelIds) { const panel = panelById(panelId); if (!panel) continue; for (const widgetId of panel.widgetIds) { const widget = panel.widgetById(widgetId); if (!widget || widget.type !== "org.kde.plasma.systemtray") continue; widget.currentConfigGroup = ["General"]; const extraItems = String(widget.readConfig("extraItems") || "").split(",").filter(item => item.length > 0 && item !== widgetName); widget.writeConfig("extraItems", extraItems); widget.reloadConfig(); } }'
+    plasma_script='const widgetName = "org.xinyang.waydroidpenmode"; for (const panelId of panelIds) { const panel = panelById(panelId); if (!panel) continue; for (const widgetId of panel.widgetIds) { const widget = panel.widgetById(widgetId); if (!widget || widget.type !== "org.kde.plasma.systemtray") continue; widget.currentConfigGroup = ["General"]; for (const key of ["extraItems", "shownItems", "hiddenItems"]) { const items = String(widget.readConfig(key) || "").split(",").filter(item => item.length > 0 && item !== widgetName); widget.writeConfig(key, items); } widget.reloadConfig(); } }'
     gdbus call --session --dest org.kde.plasmashell \
         --object-path /PlasmaShell \
         --method org.kde.PlasmaShell.evaluateScript "$plasma_script" \
@@ -106,7 +122,7 @@ if [[ -f "$LXC_CONFIG" ]] && {
 fi
 
 sudo rm -f \
-    /etc/udev/rules.d/99-waydroid-pen-mode.rules \
+    "$RULE_PATH" \
     /etc/sudoers.d/waydroid-pen-mode \
     /etc/systemd/system/waydroid-pen-link-sync.path \
     /etc/systemd/system/waydroid-pen-link-sync.service \
@@ -119,7 +135,26 @@ sudo rm -f \
     "$ANDROID_OVERLAY/keychars/Vendor_2717_Product_3654.kcm" \
     "$ANDROID_OVERLAY/keylayout/Vendor_2717_Product_3655.kl" \
     "$ANDROID_OVERLAY/keychars/Vendor_2717_Product_3655.kcm" \
-    "$HELPER"
+    "$HELPER" \
+    /run/waydroid-pen-direct \
+    /run/waydroid-pen-mode/state.json \
+    /run/waydroid-pen-mode/link-state.json \
+    /run/waydroid-pen-mode/control.sock \
+    /run/lock/waydroid-pen-mode.lock
+# Best-effort cleanup if an experimental IDC overlay was installed earlier.
+sudo rm -f \
+    "$ANDROID_OVERLAY/idc/Vendor_2717_Product_3654.idc" \
+    "$ANDROID_OVERLAY/idc/NVTCapacitivePenM80p.idc" \
+    "$ANDROID_OVERLAY/idc/NVTCapacitivePenP81c.idc" \
+    "$ANDROID_OVERLAY/idc/Vendor_2717_Product_3655.idc"
+sudo rmdir /etc/systemd/system/waydroid-container.service.d 2>/dev/null || true
+sudo rmdir /run/waydroid-pen-mode 2>/dev/null || true
+
+# Restore any pre-bridge udev rule that install renamed aside.
+if sudo test -e "$LEGACY_RULE_DISABLED" && ! sudo test -e "$LEGACY_RULE_PATH"; then
+    sudo mv "$LEGACY_RULE_DISABLED" "$LEGACY_RULE_PATH"
+fi
+
 rm -rf "$INSTALL_HOME/.local/share/gnome-shell/extensions/$UUID"
 rm -f \
     "$INSTALL_HOME/.config/systemd/user/waydroid-pen-session@.service" \
@@ -130,7 +165,22 @@ rm -f \
 rmdir "$INSTALL_HOME/.config/waydroid-pen-mode" 2>/dev/null || true
 rmdir "$INSTALL_HOME/.local/state/waydroid-pen-mode" 2>/dev/null || true
 systemctl --user daemon-reload
-sudo udevadm control --reload-rules
 sudo systemctl daemon-reload
 
-echo "Uninstalled. Reboot to stop the proxy and restore the physical GNOME pen."
+# Drop LIBINPUT_IGNORE_DEVICE from still-live driver nodes so THP pens can be
+# used by the desktop without waiting for a full reboot when possible.
+sudo udevadm control --reload-rules
+for event_path in /sys/class/input/event*; do
+    device_name=$(cat "$event_path/device/name" 2>/dev/null || true)
+    if [[ "$device_name" == "NVTCapacitivePenM80p" \
+            || "$device_name" == "NVTCapacitivePenP81c" \
+            || "$device_name" == "Xiaomi Focus Pen Pro Gestures" ]]; then
+        sudo udevadm trigger --action=add "$event_path" || true
+    fi
+done
+sudo udevadm settle || true
+
+echo "Uninstalled waydroid-pen-bridge."
+echo "xiaomi-sheng-thp is left installed and running if it was already present."
+echo "Reboot recommended so libinput fully rediscovers the physical pen nodes."
+echo "After reboot, desktop pen input should come directly from THP again."
