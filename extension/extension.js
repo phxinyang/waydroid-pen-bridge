@@ -13,24 +13,38 @@ import {
 
 const SESSION_HELPER = '/usr/local/libexec/waydroid-pen-session';
 const POLICIES = ['auto', 'waydroid', 'desktop'];
-const LABELS = {
-    auto: '自动',
-    waydroid: 'Waydroid',
-    desktop: '桌面',
-};
+
+function useChineseUi() {
+    const candidates = [
+        GLib.getenv('LC_ALL'),
+        GLib.getenv('LC_MESSAGES'),
+        GLib.getenv('LANG'),
+    ];
+    for (const value of candidates) {
+        if (value && value.toLowerCase().startsWith('zh'))
+            return true;
+    }
+    return false;
+}
+
+const ZH = useChineseUi();
+const LABELS = ZH
+    ? {auto: '自动', waydroid: 'Waydroid', desktop: '桌面'}
+    : {auto: 'Auto', waydroid: 'Waydroid', desktop: 'Desktop'};
+const TITLE = ZH ? '触控笔模式' : 'Pen Mode';
 
 const PenModeToggle = GObject.registerClass(
 class PenModeToggle extends QuickMenuToggle {
     constructor(extension) {
         super({
-            title: '触控笔模式',
+            title: TITLE,
             subtitle: LABELS[extension.policy],
             iconName: 'input-tablet-symbolic',
             menuEnabled: true,
             toggleMode: false,
         });
 
-        this.menu.setHeader('input-tablet-symbolic', '触控笔模式');
+        this.menu.setHeader('input-tablet-symbolic', TITLE);
         this._items = new Map();
         for (const policy of POLICIES) {
             const item = new PopupMenu.PopupMenuItem(LABELS[policy]);

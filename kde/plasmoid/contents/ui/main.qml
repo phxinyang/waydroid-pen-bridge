@@ -16,19 +16,25 @@ PlasmoidItem {
     property var commandKinds: ({})
     property bool statusPending: false
     property bool policyPending: false
+    readonly property bool chineseUi: {
+        const locale = Qt.locale().name.toLowerCase();
+        return locale.startsWith("zh");
+    }
+    readonly property string titleText: chineseUi ? "触控笔模式" : "Pen Mode"
+    readonly property var policyLabels: chineseUi
+        ? ({auto: "自动", waydroid: "Waydroid", desktop: "桌面"})
+        : ({auto: "Auto", waydroid: "Waydroid", desktop: "Desktop"})
+    readonly property string unavailableText: chineseUi ? "不可用" : "Unavailable"
+    readonly property string failText: chineseUi ? "触控笔模式切换失败" : "Pen mode switch failed"
 
-    Plasmoid.title: "触控笔模式"
-    toolTipMainText: "触控笔模式"
+    Plasmoid.title: titleText
+    toolTipMainText: titleText
     toolTipSubText: modeLabel()
 
     function modeLabel() {
-        const labels = {
-            auto: "自动",
-            waydroid: "Waydroid",
-            desktop: "桌面",
-        };
+        const labels = policyLabels;
         const modeText = mode === "direct" ? "Waydroid" :
-            mode === "desktop" ? "桌面" : "不可用";
+            mode === "desktop" ? labels.desktop : unavailableText;
         return `${labels[policy] ?? policy} · ${modeText}`;
     }
 
@@ -93,15 +99,15 @@ PlasmoidItem {
         Layout.minimumWidth: Kirigami.Units.gridUnit * 12
 
         PlasmaComponents3.Label {
-            text: "触控笔模式"
+            text: root.titleText
             font.bold: true
         }
 
         Repeater {
             model: [
-                {key: "auto", label: "自动"},
-                {key: "waydroid", label: "Waydroid"},
-                {key: "desktop", label: "桌面"},
+                {key: "auto", label: root.policyLabels.auto},
+                {key: "waydroid", label: root.policyLabels.waydroid},
+                {key: "desktop", label: root.policyLabels.desktop},
             ]
 
             delegate: PlasmaComponents3.RadioButton {
@@ -145,7 +151,7 @@ PlasmoidItem {
                 root.policyPending = false;
             const exitCode = Number(data["exit code"] ?? 1);
             if (exitCode !== 0) {
-                root.lastError = String(data.stderr ?? "触控笔模式切换失败").trim();
+                root.lastError = String(data.stderr ?? root.failText).trim();
                 return;
             }
             if (kind === "status")

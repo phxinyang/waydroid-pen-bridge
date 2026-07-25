@@ -14,10 +14,10 @@ is actually producing frames, and creates an optional Pro gesture proxy.
 The GNOME Quick Settings menu and KDE Plasma System Tray provide the same three
 policies:
 
-- **自动:** follow the focused window.
+- **Auto:** follow the focused window.
 - **Waydroid:** always send the physical evdev pen coordinates to Android. Pen
   button events still require a focused Waydroid window.
-- **桌面:** always forward the physical pen to the stable desktop proxy. When a
+- **Desktop:** always forward the physical pen to the stable desktop proxy. When a
   Waydroid window is focused, ordinary pen buttons and Focus Pen Pro gestures
   use a separate Android side channel without changing the pen-coordinate
   route.
