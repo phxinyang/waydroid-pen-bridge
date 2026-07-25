@@ -824,6 +824,9 @@ class PenRelay:
         self.waydroid_focused = False
         self.android_pro_active = False
         self.android_button_active = False
+        self.tip_down = False
+        self.pending_mode = None
+        self.mode_switch_count = 0
         self.capability_generation = self._next_capability_generation()
         self.instance_id = uuid.uuid4().hex
 
@@ -940,6 +943,9 @@ class PenRelay:
             "waydroid_focused": self.waydroid_focused,
             "android_pro_active": self.android_pro_active,
             "android_button_active": self.android_button_active,
+            "tip_down": self.tip_down,
+            "pending_mode": self.pending_mode,
+            "mode_switch_count": self.mode_switch_count,
             "capability_generation": self.capability_generation,
             "instance_id": self.instance_id,
             "forwarding": self.mode in {"desktop", "direct"},
@@ -1029,11 +1035,15 @@ class PenRelay:
         # A gestures source may remain present while the ordinary M80p is the
         # active pen.  Android must only receive the path belonging to the
         # active physical pen; merely having a paired Pro device is not enough.
-        return (
-            self.active_model == MODEL_P81C
-            and self.pro_available
-            and self.waydroid_focused
-        )
+        #
+        # Direct mode keeps Android gestures alive even if KWin focus blips,
+        # because the pen path itself is already Android-only.  Desktop mode
+        # still requires focus so background Waydroid apps stay quiet.
+        if self.active_model != MODEL_P81C or not self.pro_available:
+            return False
+        if self.mode == "direct":
+            return True
+        return self.waydroid_focused
 
     def _set_android_pro_active(self, active, synthesize_pressed=False):
         active = bool(active)
@@ -1055,7 +1065,9 @@ class PenRelay:
         if self.active_model != MODEL_M80P:
             return None
         if self.mode == "direct":
-            return "direct-pen" if self.waydroid_focused else None
+            # Direct already isolates pen frames on Android; keep ordinary
+            # buttons there without depending on flaky focus reports.
+            return "direct-pen"
         if self.waydroid_focused:
             return "android-button"
         return "desktop-pen"
@@ -1150,6 +1162,12 @@ class PenRelay:
         self._reset_ordinary_button_state()
         self.ordinary_button_route = None
         self._reroute_ordinary_buttons()
+        # Model switches can change whether Android Pro gestures are legal
+        # (direct+p81c needs them; m80p never does).
+        if self._android_pro_should_be_active():
+            self._set_android_pro_active(True, synthesize_pressed=False)
+        elif self.android_pro_active:
+            self._set_android_pro_active(False)
         self.capability_generation += 1
         self._write_state()
         self._write_link_state()
@@ -1166,6 +1184,25 @@ class PenRelay:
                 return True
         return False
 
+    def _update_tip_state(self, data):
+        changed = False
+        for offset in range(0, len(data), INPUT_EVENT.size):
+            _s, _us, event_type, code, value = INPUT_EVENT.unpack_from(data, offset)
+            if event_type == EV_KEY and code == BTN_TOUCH and value in (0, 1):
+                tip = value == 1
+                if tip != self.tip_down:
+                    self.tip_down = tip
+                    changed = True
+            elif event_type == EV_ABS and code == ABS_PRESSURE:
+                tip = value > 0
+                if tip != self.tip_down:
+                    self.tip_down = tip
+                    changed = True
+        if changed and not self.tip_down and self.pending_mode is not None:
+            self._apply_pending_mode()
+            return True
+        return changed
+
     def _release_desktop_proxies(self):
         for proxy in self.proxies.values():
             proxy.release()
@@ -1177,32 +1214,68 @@ class PenRelay:
             if hasattr(proxy, "release"):
                 proxy.release()
 
-    def set_desktop_mode(self):
-        if self.mode == "direct":
-            # Leaving direct must clear every Android pen tip before desktop
-            # frames resume, including the inactive model proxy.
+    def _commit_mode(self, mode):
+        if mode == self.mode:
+            self.pending_mode = None
+            return False
+        previous = self.mode
+        if mode == "desktop":
+            if previous == "direct":
+                # Leaving direct must clear every Android pen tip before desktop
+                # frames resume, including the inactive model proxy.
+                self._release_android_pen_paths()
+            self.mode = "desktop"
+            self._reroute_ordinary_buttons()
+            if self.android_pro_active and not self._android_pro_should_be_active():
+                self._set_android_pro_active(False)
+            if self.pro_available:
+                self._synthesize_desktop_pro_state()
+        else:
+            # Drop any held desktop tip so only the hidden Android proxies
+            # carry the next stroke.
+            self._release_desktop_proxies()
             self._release_android_pen_paths()
-        self.mode = "desktop"
-        self._reroute_ordinary_buttons()
-        if self.android_pro_active and not self._android_pro_should_be_active():
-            self._set_android_pro_active(False)
-        if self.pro_available:
-            self._synthesize_desktop_pro_state()
+            self.mode = "direct"
+            self._reroute_ordinary_buttons()
+            self._set_android_pro_active(
+                self._android_pro_should_be_active(), synthesize_pressed=True
+            )
+        self.pending_mode = None
+        self.mode_switch_count += 1
+        return True
+
+    def _apply_pending_mode(self):
+        pending = self.pending_mode
+        if pending is None or pending == self.mode:
+            self.pending_mode = None
+            return False
+        return self._commit_mode(pending)
+
+    def set_desktop_mode(self):
+        if self.mode == "desktop" and self.pending_mode is None:
+            return self._response()
+        if self.tip_down and self.mode != "desktop":
+            # Finish the current stroke on the current path, then flip.
+            self.pending_mode = "desktop"
+            self._write_state()
+            return self._response()
+        self._commit_mode("desktop")
         self._write_state()
         return self._response()
 
     def set_direct_mode(self, generation, pro_available):
         self._require_capability(generation, pro_available)
-        if self.mode != "direct":
-            # Drop any held desktop tip so only the hidden Android proxies
-            # carry the next stroke.
-            self._release_desktop_proxies()
-            self._release_android_pen_paths()
-        self.mode = "direct"
-        self._reroute_ordinary_buttons()
-        self._set_android_pro_active(
-            self._android_pro_should_be_active(), synthesize_pressed=True
-        )
+        if self.mode == "direct" and self.pending_mode is None:
+            self._set_android_pro_active(
+                self._android_pro_should_be_active(), synthesize_pressed=True
+            )
+            self._write_state()
+            return self._response()
+        if self.tip_down and self.mode != "direct":
+            self.pending_mode = "direct"
+            self._write_state()
+            return self._response()
+        self._commit_mode("direct")
         self._write_state()
         return self._response()
 
@@ -1223,11 +1296,12 @@ class PenRelay:
         focused = bool(focused)
         focus_changed = focused != self.waydroid_focused
         self.waydroid_focused = focused
-        if self._android_pro_should_be_active() and not self.android_pro_active:
+        should = self._android_pro_should_be_active()
+        if should and not self.android_pro_active:
             if self.gesture_proxy is not None:
                 self.gesture_proxy.release()
             routing_changed = self._set_android_pro_active(True, False)
-        elif not focused and self.android_pro_active:
+        elif not should and self.android_pro_active:
             routing_changed = self._set_android_pro_active(False)
         else:
             routing_changed = False
@@ -1247,14 +1321,14 @@ class PenRelay:
             return
         source = self.sources[model]
         profile = PEN_PROFILES[model]
+        tip_changed = self._update_tip_state(data)
         self._update_ordinary_button_state(data)
         suppress = ()
         if model == MODEL_M80P:
             expected_route = (
-                "desktop-pen" if self.mode == "desktop"
-                else "direct-pen" if self.waydroid_focused else None
+                "desktop-pen" if self.mode == "desktop" else "direct-pen"
             )
-            if expected_route is None or self.ordinary_button_route != expected_route:
+            if self.ordinary_button_route != expected_route:
                 suppress = ORDINARY_BUTTON_CODES
         if self.mode == "desktop":
             mapped = transform_pen_events(
@@ -1270,6 +1344,8 @@ class PenRelay:
             mapper.feed(data, True, suppress_keys=suppress)
         if model == MODEL_M80P and self.ordinary_button_route == "android-button":
             self.android_button_proxy.feed(data, "ordinary")
+        if tip_changed:
+            self._write_state()
 
     def forward_gesture(self, data):
         if (
@@ -1279,10 +1355,13 @@ class PenRelay:
         ):
             return
         self._update_pro_gesture_state(data)
-        if self.mode == "desktop" and not self.android_pro_active:
-            self.gesture_proxy.feed(data, "gesture")
+        # Prefer Android gestures whenever that side channel is active.  In
+        # direct mode it stays active without focus; desktop still gates on
+        # focus via _android_pro_should_be_active().
         if self.android_pro_active and self.android_gesture_proxy is not None:
             self.android_gesture_proxy.feed(data, "gesture")
+        elif self.mode == "desktop":
+            self.gesture_proxy.feed(data, "gesture")
 
     def set_mapping(self, values):
         for mapper in self.mappers.values():

@@ -180,6 +180,9 @@ class RelayTests(unittest.TestCase):
         relay.waydroid_focused = False
         relay.android_pro_active = False
         relay.android_button_active = False
+        relay.tip_down = False
+        relay.pending_mode = None
+        relay.mode_switch_count = 0
         relay.capability_generation = 1
         relay.instance_id = "test-relay-instance"
         relay.proxy = FakeProxy()
@@ -446,16 +449,19 @@ class RelayTests(unittest.TestCase):
             [(MODULE.EV_KEY, MODULE.BTN_STYLUS, 0)],
         )
 
-    def test_ordinary_direct_unfocused_filters_buttons(self):
+    def test_ordinary_direct_unfocused_keeps_buttons_on_android_pen(self):
+        # Direct mode isolates writing on Android already, so ordinary buttons
+        # stay on the Android pen path without requiring a focus report.
         with tempfile.TemporaryDirectory() as directory:
             relay = self.make_relay(Path(directory) / "state.json")
             relay.set_direct_mode(relay.capability_generation, False)
             relay.forward(pen_frame((MODULE.BTN_STYLUS, 1)))
 
-        self.assertNotIn(
+        self.assertIn(
             (MODULE.EV_KEY, MODULE.BTN_STYLUS, 1),
             event_values(relay.android_proxy.writes),
         )
+        self.assertEqual(relay.proxies[MODULE.MODEL_M80P].writes, [])
 
     def test_ordinary_direct_focus_uses_pen_proxy_only(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -670,19 +676,15 @@ class RelayTests(unittest.TestCase):
             ],
         )
 
-    def test_dynamic_pro_capability_waits_for_explicit_android_activation(self):
+    def test_dynamic_pro_capability_activates_gestures_in_direct_mode(self):
+        # Direct mode no longer waits for a focus report before enabling the
+        # Android gesture side channel for the active Pro pen.
         with tempfile.TemporaryDirectory() as directory:
             relay = self.make_relay(Path(directory) / "state.json")
             relay.set_direct_mode(relay.capability_generation, False)
-            relay.set_waydroid_focus(True)
             relay._set_pro_available(True)
             relay._activate_model(MODULE.MODEL_P81C)
             relay.forward_gesture(gesture_frame(MODULE.BTN_6, 1))
-
-            self.assertFalse(relay.android_pro_active)
-            self.assertEqual(relay.android_gesture_proxy.writes, [])
-
-            relay.activate_android_pro(relay.capability_generation)
             relay.forward_gesture(gesture_frame(MODULE.BTN_6, 0))
 
         self.assertTrue(relay.android_pro_active)
@@ -750,7 +752,7 @@ class RelayTests(unittest.TestCase):
             },
         )
 
-    def test_direct_focus_loss_also_releases_android_gesture_keys(self):
+    def test_direct_focus_loss_keeps_android_gesture_keys(self):
         with tempfile.TemporaryDirectory() as directory:
             relay = self.make_pro_relay(Path(directory) / "state.json")
             relay._set_pro_available(True)
@@ -759,12 +761,40 @@ class RelayTests(unittest.TestCase):
             relay.forward_gesture(gesture_frame(MODULE.BTN_7, 1))
             write_count = len(relay.android_gesture_proxy.writes)
             relay.set_waydroid_focus(False)
+            relay.forward_gesture(gesture_frame(MODULE.BTN_7, 0))
 
-        self.assertFalse(relay.android_pro_active)
+        self.assertTrue(relay.android_pro_active)
         self.assertEqual(
             event_values(relay.android_gesture_proxy.writes[write_count:]),
             [(MODULE.EV_KEY, MODULE.BTN_7, 0)],
         )
+
+    def test_mode_switch_defers_while_tip_is_down(self):
+        with tempfile.TemporaryDirectory() as directory:
+            relay = self.make_relay(Path(directory) / "state.json")
+            down = b"".join(
+                (
+                    MODULE.make_event(MODULE.EV_KEY, MODULE.BTN_TOUCH, 1),
+                    MODULE.make_event(MODULE.EV_ABS, MODULE.ABS_PRESSURE, 1000),
+                    MODULE.make_event(MODULE.EV_SYN, MODULE.SYN_REPORT, 0),
+                )
+            )
+            up = b"".join(
+                (
+                    MODULE.make_event(MODULE.EV_KEY, MODULE.BTN_TOUCH, 0),
+                    MODULE.make_event(MODULE.EV_ABS, MODULE.ABS_PRESSURE, 0),
+                    MODULE.make_event(MODULE.EV_SYN, MODULE.SYN_REPORT, 0),
+                )
+            )
+            relay.forward(down)
+            self.assertTrue(relay.tip_down)
+            relay.set_direct_mode(relay.capability_generation, False)
+            self.assertEqual(relay.mode, "desktop")
+            self.assertEqual(relay.pending_mode, "direct")
+            relay.forward(up)
+            self.assertFalse(relay.tip_down)
+            self.assertEqual(relay.mode, "direct")
+            self.assertIsNone(relay.pending_mode)
 
     def test_desktop_focus_gain_does_not_replay_held_button(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -18,6 +18,10 @@ SOURCE_EPOCH_PATTERN = re.compile(
     r"(?:gnome|kde)_(\d{13,16})_(\d{1,16})\Z"
 )
 TOKEN_SCALE = 1_000_000_000
+# Keep direct briefly after focus loss so auto mode does not thrash when KWin
+# reports a one-frame unfocus while the Waydroid window is still frontmost.
+AUTO_STICKY_DIRECT_NS = 900_000_000
+MIN_MODE_FLIP_NS = 250_000_000
 
 
 class SessionError(RuntimeError):
@@ -239,18 +243,47 @@ def accept_context(previous, incoming):
         raise SessionError("conflicting desktop context generation")
 
 
-def desired_mode(policy, context):
+def raw_android_focus(context):
+    return bool(context["waydroid_focused"] and not context["overview"])
+
+
+def desired_mode(policy, context, state=None):
     if policy == "waydroid":
         return "direct"
     if policy == "desktop":
         return "desktop"
     if context["overview"]:
         return "desktop"
-    return "direct" if context["waydroid_focused"] else "desktop"
+    focused = resolve_effective_focus(policy, context, state or {})
+    return "direct" if focused else "desktop"
 
 
-def desired_android_focus(context):
-    return bool(context["waydroid_focused"] and not context["overview"])
+def desired_android_focus(context, state=None, policy="auto"):
+    if context.get("overview"):
+        return False
+    if policy == "waydroid":
+        return True
+    if policy == "desktop":
+        return raw_android_focus(context)
+    return resolve_effective_focus(policy, context, state or {})
+
+
+def resolve_effective_focus(policy, context, state):
+    """Apply auto stickiness on top of the already-debounced KWin focus bit."""
+    raw = raw_android_focus(context)
+    if policy != "auto":
+        return raw
+    if context.get("overview"):
+        return False
+    if raw:
+        return True
+    # Lost focus: keep direct for a short sticky window after we last applied it.
+    if state.get("applied_mode") != "direct":
+        return False
+    last_direct = state.get("last_direct_at_ns")
+    if not isinstance(last_direct, int):
+        return False
+    return (time.time_ns() - last_direct) < AUTO_STICKY_DIRECT_NS
 
 
 def root_command(arguments, *, check=True):
@@ -312,9 +345,9 @@ def context_mapping(context):
     return tuple(float(value) for value in mapping)
 
 
-def routing_already_applied(policy, context, root_status):
-    desired = desired_mode(policy, context)
-    focused = desired_android_focus(context)
+def routing_already_applied(policy, context, root_status, state=None):
+    desired = desired_mode(policy, context, state)
+    focused = desired_android_focus(context, state, policy)
     if root_status.get("mode") != desired:
         return False
     if relay_waydroid_focused(root_status) != focused:
@@ -324,13 +357,11 @@ def routing_already_applied(policy, context, root_status):
     return True
 
 
-def apply_context(policy, context):
-    mode = desired_mode(policy, context)
-    focused = desired_android_focus(context)
+def apply_routing(mode, focused, mapping):
+    """Drive the root helper to an explicit mode/focus pair."""
     if not focused:
         root_command(["focus", "0"])
     if mode == "direct":
-        mapping = context.get("mapping")
         if mapping is None:
             root_command(["unmap"])
         else:
@@ -345,40 +376,89 @@ def apply_context(policy, context):
     return mode
 
 
-def apply_verified_context(policy, context):
-    desired = desired_mode(policy, context)
-    focused = desired_android_focus(context)
+def apply_context(policy, context, state=None):
+    mode = desired_mode(policy, context, state)
+    focused = desired_android_focus(context, state, policy)
+    return apply_routing(mode, focused, context.get("mapping"))
+
+
+def suppress_rapid_mode_flip(policy, state, desired, focused):
+    """Hold the previous mode briefly when auto focus blips reverse direction."""
+    previous_mode = state.get("applied_mode")
+    last_switch = state.get("last_switch_at_ns")
+    if (
+        policy != "auto"
+        or previous_mode not in {"desktop", "direct"}
+        or desired == previous_mode
+        or not isinstance(last_switch, int)
+        or (time.time_ns() - last_switch) >= MIN_MODE_FLIP_NS
+    ):
+        return desired, focused
+    if previous_mode == "direct":
+        return "direct", True
+    return "desktop", False
+
+
+def apply_verified_context(policy, context, state=None):
+    state = state if state is not None else {}
+    desired = desired_mode(policy, context, state)
+    focused = desired_android_focus(context, state, policy)
+    desired, focused = suppress_rapid_mode_flip(
+        policy, state, desired, focused
+    )
+    mapping = context.get("mapping")
     for _attempt in range(3):
         before = query_root_status()
         before_instance = relay_instance(before)
-        if routing_already_applied(policy, context, before):
-            return desired, before_instance
-        applied_mode = apply_context(policy, context)
+        if (
+            before.get("mode") == desired
+            and relay_waydroid_focused(before) == focused
+            and (
+                desired != "direct"
+                or root_mapping(before) == context_mapping(context)
+            )
+        ):
+            return desired, before_instance, focused
+        apply_routing(desired, focused, mapping)
         after = query_root_status()
         after_instance = relay_instance(after)
         if (
             before_instance == after_instance
-            and applied_mode == desired
             and after.get("mode") == desired
             and relay_waydroid_focused(after) == focused
         ):
-            return applied_mode, after_instance
+            return desired, after_instance, focused
     raise SessionError("pen relay changed repeatedly while applying context")
 
 
 def reconcile(paths, policy, context, state):
+    now = time.time_ns()
+    effective_focus = desired_android_focus(context, state, policy)
+    desired = desired_mode(policy, context, state)
     state.update(
         {
             "policy": policy,
             "context": context,
-            "desired_mode": desired_mode(policy, context),
-            "updated_at_ns": time.time_ns(),
+            "desired_mode": desired,
+            "effective_focused": effective_focus,
+            "raw_focused": raw_android_focus(context),
+            "updated_at_ns": now,
         }
     )
+    previous_mode = state.get("applied_mode")
     try:
-        applied_mode, instance = apply_verified_context(policy, context)
+        applied_mode, instance, focused = apply_verified_context(
+            policy, context, state
+        )
+        if previous_mode and applied_mode != previous_mode:
+            state["switch_count"] = int(state.get("switch_count") or 0) + 1
+            state["last_switch"] = f"{previous_mode}->{applied_mode}"
+            state["last_switch_at_ns"] = now
         state["applied_mode"] = applied_mode
         state["relay_instance"] = instance
+        state["applied_focused"] = focused
+        if applied_mode == "direct":
+            state["last_direct_at_ns"] = now
         state["last_error"] = None
     except Exception as error:
         state["last_error"] = str(error)
@@ -394,8 +474,8 @@ def reapply_saved(paths, policy, context, state):
     if state.get("relay_instance") == instance:
         return state
 
-    desired = desired_mode(policy, context)
-    focused = desired_android_focus(context)
+    desired = desired_mode(policy, context, state)
+    focused = desired_android_focus(context, state, policy)
     if (
         root_status.get("mode") == desired
         and relay_waydroid_focused(root_status) == focused
@@ -406,6 +486,9 @@ def reapply_saved(paths, policy, context, state):
                 "context": context,
                 "desired_mode": desired,
                 "applied_mode": desired,
+                "effective_focused": focused,
+                "raw_focused": raw_android_focus(context),
+                "applied_focused": focused,
                 "relay_instance": instance,
                 "last_error": None,
                 "updated_at_ns": time.time_ns(),
@@ -422,17 +505,42 @@ def status(paths):
     context = state.get("context")
     if not isinstance(context, dict):
         context = default_context()
+    effective_focus = desired_android_focus(context, state, policy)
     state.update(
         {
             "policy": policy,
             "context": context,
-            "desired_mode": desired_mode(policy, context),
+            "desired_mode": desired_mode(policy, context, state),
+            "effective_focused": effective_focus,
+            "raw_focused": raw_android_focus(context),
+            "switch_count": int(state.get("switch_count") or 0),
+            "last_switch": state.get("last_switch"),
+            "last_switch_at_ns": state.get("last_switch_at_ns"),
+            "last_direct_at_ns": state.get("last_direct_at_ns"),
+            "sticky_direct_ns": AUTO_STICKY_DIRECT_NS,
+            "min_mode_flip_ns": MIN_MODE_FLIP_NS,
         }
     )
     result = root_command(["status"], check=False)
     if result.returncode == 0:
         try:
-            state["root"] = json.loads(result.stdout)
+            root = json.loads(result.stdout)
+            state["root"] = root
+            relay = root.get("relay") if isinstance(root, dict) else None
+            if isinstance(relay, dict):
+                state["observability"] = {
+                    "mode": relay.get("mode"),
+                    "waydroid_focused": relay.get("waydroid_focused"),
+                    "android_pro_active": relay.get("android_pro_active"),
+                    "android_button_active": relay.get("android_button_active"),
+                    "active_pen": relay.get("active_pen"),
+                    "tip_down": relay.get("tip_down"),
+                    "pending_mode": relay.get("pending_mode"),
+                    "mode_switch_count": relay.get("mode_switch_count"),
+                    "android_link": root.get("android_link"),
+                    "android_gesture_link": root.get("android_gesture_link"),
+                    "waydroid_running": root.get("waydroid_running"),
+                }
         except json.JSONDecodeError:
             state["root"] = {"error": "root helper returned invalid JSON"}
     else:

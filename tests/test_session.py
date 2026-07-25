@@ -2,6 +2,7 @@ import importlib.util
 import json
 from pathlib import Path
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -95,6 +96,43 @@ class SessionTests(unittest.TestCase):
             ],
         )
 
+    def test_auto_keeps_direct_briefly_after_focus_loss(self):
+        state = {
+            "applied_mode": "direct",
+            "last_direct_at_ns": time.time_ns(),
+        }
+        unfocused = MODULE.make_context("kde", 5, False, False, None)
+        self.assertEqual(
+            MODULE.desired_mode("auto", unfocused, state), "direct"
+        )
+        self.assertTrue(
+            MODULE.desired_android_focus(unfocused, state, "auto")
+        )
+
+    def test_auto_overview_still_forces_desktop_during_sticky(self):
+        state = {
+            "applied_mode": "direct",
+            "last_direct_at_ns": time.time_ns(),
+        }
+        overview = MODULE.make_context("kde", 6, True, True, None)
+        self.assertEqual(
+            MODULE.desired_mode("auto", overview, state), "desktop"
+        )
+        self.assertFalse(
+            MODULE.desired_android_focus(overview, state, "auto")
+        )
+
+    def test_suppress_rapid_mode_flip_holds_previous_mode(self):
+        state = {
+            "applied_mode": "direct",
+            "last_switch_at_ns": time.time_ns(),
+        }
+        desired, focused = MODULE.suppress_rapid_mode_flip(
+            "auto", state, "desktop", False
+        )
+        self.assertEqual(desired, "direct")
+        self.assertTrue(focused)
+
     def test_desktop_context_does_not_mutate_mapping(self):
         context = MODULE.make_context("gnome", 2, False, True, None)
         with mock.patch.object(MODULE, "root_command") as root:
@@ -126,18 +164,9 @@ class SessionTests(unittest.TestCase):
             context = MODULE.make_context("kde", 4, True, False, None)
             with (
                 mock.patch.object(
-                    MODULE, "apply_context", return_value="direct"
-                ),
-                mock.patch.object(
                     MODULE,
-                    "query_root_status",
-                    return_value={
-                        "mode": "direct",
-                        "relay": {
-                            "instance_id": "relay-1",
-                            "waydroid_focused": True,
-                        },
-                    },
+                    "apply_verified_context",
+                    return_value=("direct", "relay-1", True),
                 ),
             ):
                 MODULE.reconcile(paths, "auto", context, {})
@@ -147,6 +176,7 @@ class SessionTests(unittest.TestCase):
         self.assertEqual(state["desired_mode"], "direct")
         self.assertEqual(state["applied_mode"], "direct")
         self.assertEqual(state["relay_instance"], "relay-1")
+        self.assertTrue(state["effective_focused"])
         self.assertIsNone(state["last_error"])
 
     def test_reapply_saved_context_after_relay_restart(self):
@@ -209,7 +239,7 @@ class SessionTests(unittest.TestCase):
             ]
             with (
                 mock.patch.object(
-                    MODULE, "apply_context", return_value="direct"
+                    MODULE, "apply_routing", return_value="direct"
                 ) as apply,
                 mock.patch.object(
                     MODULE, "query_root_status", side_effect=statuses

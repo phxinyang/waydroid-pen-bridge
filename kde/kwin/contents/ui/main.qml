@@ -10,6 +10,14 @@ Item {
     property bool overviewActive: false
     property var trackedWindow: null
     property string lastSignature: ""
+    // Debounced focus that is actually reported to the session helper.
+    property bool reportedFocused: false
+    property bool pendingFocused: false
+    property var pendingMapping: null
+
+    readonly property int enterFocusMs: 80
+    readonly property int leaveFocusMs: 450
+    readonly property int geometryMs: 150
 
     function isWaydroidWindow(window) {
         if (!window)
@@ -58,19 +66,18 @@ Item {
         ];
     }
 
-    function contextSignature() {
-        const focused = isWaydroidWindow(Workspace.activeWindow) ? 1 : 0;
-        const mapping = mappingForWindow(findWaydroidWindow());
+    function quantizeMapping(mapping) {
+        if (!mapping)
+            return "none";
+        return mapping.map(value => String(Math.round(value * 1000000000))).join(".");
+    }
+
+    function contextSignature(focused, mapping) {
         const parts = [
-            String(focused),
+            focused ? "1" : "0",
             overviewActive ? "1" : "0",
+            quantizeMapping(mapping),
         ];
-        if (mapping) {
-            for (const value of mapping)
-                parts.push(String(Math.round(value * 1000000000)));
-        } else {
-            parts.push("none");
-        }
         return parts.join(".");
     }
 
@@ -79,22 +86,39 @@ Item {
         return `ctx.${sourceId}.${generation}.${signature}`;
     }
 
-    function scheduleReport(delay) {
-        reportTimer.interval = delay ?? 80;
-        reportTimer.restart();
+    function liveFocused() {
+        return isWaydroidWindow(Workspace.activeWindow);
     }
 
-    function reportContext() {
-        // Only start a session unit when focus/overview/geometry actually
-        // changed.  Bumping generation on every timer tick flooded systemd
-        // with identical desktop applies and delayed real mode switches.
-        const signature = contextSignature();
+    function evaluateFocus() {
+        const focused = liveFocused();
+        if (focused === pendingFocused)
+            return;
+        pendingFocused = focused;
+        // Enter Waydroid quickly; leave slowly so brief focus blips do not
+        // thrash desktop/direct routing while writing.
+        focusTimer.interval = focused ? enterFocusMs : leaveFocusMs;
+        focusTimer.restart();
+    }
+
+    function evaluateGeometry() {
+        pendingMapping = mappingForWindow(findWaydroidWindow());
+        geometryTimer.restart();
+    }
+
+    function publish(focused, mapping) {
+        const signature = contextSignature(focused, mapping);
         if (signature === lastSignature)
             return;
         lastSignature = signature;
+        reportedFocused = focused;
         const unit = `waydroid-pen-session@${contextToken(signature)}.service`;
         startUnit.arguments = [unit, "replace"];
         startUnit.call();
+    }
+
+    function reportNow() {
+        publish(reportedFocused, mappingForWindow(findWaydroidWindow()));
     }
 
     function updateOverview(returnValue) {
@@ -108,7 +132,11 @@ Item {
         if (active === overviewActive)
             return;
         overviewActive = active;
-        scheduleReport(0);
+        // Overview must force desktop immediately.
+        focusTimer.stop();
+        pendingFocused = false;
+        reportedFocused = false;
+        publish(false, mappingForWindow(findWaydroidWindow()));
     }
 
     DBusCall {
@@ -131,10 +159,24 @@ Item {
     }
 
     Timer {
-        id: reportTimer
+        id: focusTimer
         interval: 80
         repeat: false
-        onTriggered: root.reportContext()
+        onTriggered: {
+            const mapping = mappingForWindow(findWaydroidWindow());
+            root.publish(root.pendingFocused, mapping);
+        }
+    }
+
+    Timer {
+        id: geometryTimer
+        interval: 150
+        repeat: false
+        onTriggered: {
+            // Geometry updates keep the debounced focus value so a resize
+            // never races a pending leave-focus timer.
+            root.publish(root.reportedFocused, root.pendingMapping);
+        }
     }
 
     Timer {
@@ -150,21 +192,24 @@ Item {
 
         function onWindowActivated() {
             root.updateTrackedWindow();
-            root.scheduleReport(50);
+            root.evaluateFocus();
+            root.evaluateGeometry();
         }
 
         function onWindowAdded() {
             root.updateTrackedWindow();
-            root.scheduleReport(80);
+            root.evaluateFocus();
+            root.evaluateGeometry();
         }
 
         function onWindowRemoved() {
             root.updateTrackedWindow();
-            root.scheduleReport(0);
+            root.evaluateFocus();
+            root.evaluateGeometry();
         }
 
         function onScreensChanged() {
-            root.scheduleReport(80);
+            root.evaluateGeometry();
         }
     }
 
@@ -173,25 +218,27 @@ Item {
         ignoreUnknownSignals: true
 
         function onBufferGeometryChanged() {
-            root.scheduleReport(80);
+            root.evaluateGeometry();
         }
 
         function onFrameGeometryChanged() {
-            root.scheduleReport(80);
+            root.evaluateGeometry();
         }
 
         function onFullScreenChanged() {
-            root.scheduleReport(80);
+            root.evaluateGeometry();
         }
 
         function onOutputChanged() {
-            root.scheduleReport(80);
+            root.evaluateGeometry();
         }
     }
 
     Component.onCompleted: {
         updateTrackedWindow();
-        scheduleReport(0);
+        pendingFocused = liveFocused();
+        reportedFocused = pendingFocused;
+        publish(reportedFocused, mappingForWindow(findWaydroidWindow()));
     }
 
     Component.onDestruction: {
