@@ -929,6 +929,8 @@ class SwitchSafetyTests(unittest.TestCase):
         self.assertIn("udevadm trigger", uninstall)
         self.assertIn("disabled-by-waydroid-pen-mode", uninstall)
         self.assertIn("xiaomi-sheng-thp is left installed", uninstall)
+        self.assertIn("98-waydroid-pen-restore-thp.rules", uninstall)
+        self.assertIn('ENV{LIBINPUT_IGNORE_DEVICE}=""', uninstall)
         self.assertNotIn("systemctl disable xiaomi-sheng-thp", uninstall)
         self.assertNotIn("systemctl stop xiaomi-sheng-thp", uninstall)
         self.assertIn('ATTRS{id/bustype}=="0006"', rules)

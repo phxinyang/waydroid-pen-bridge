@@ -167,20 +167,37 @@ rmdir "$INSTALL_HOME/.local/state/waydroid-pen-mode" 2>/dev/null || true
 systemctl --user daemon-reload
 sudo systemctl daemon-reload
 
-# Drop LIBINPUT_IGNORE_DEVICE from still-live driver nodes so THP pens can be
-# used by the desktop without waiting for a full reboot when possible.
+# udev keeps previously assigned properties on live nodes until a rule clears
+# them.  After removing the bridge ignore rules, explicitly unset
+# LIBINPUT_IGNORE_DEVICE on the physical THP pen/gesture sources.
+CLEAR_RULE=/etc/udev/rules.d/98-waydroid-pen-restore-thp.rules
+clear_tmp=$(mktemp)
+cat >"$clear_tmp" <<'EOF'
+SUBSYSTEM!="input", GOTO="waydroid_pen_restore_end"
+KERNEL!="event*", GOTO="waydroid_pen_restore_end"
+ATTRS{name}=="NVTCapacitivePenM80p", ATTRS{phys}=="input/pen", ENV{LIBINPUT_IGNORE_DEVICE}=""
+ATTRS{name}=="NVTCapacitivePenP81c", ATTRS{phys}=="input/pen_p81c", ENV{LIBINPUT_IGNORE_DEVICE}=""
+ATTRS{name}=="Xiaomi Focus Pen Pro Gestures", ATTRS{phys}=="input/pen_p81c/gestures", ENV{LIBINPUT_IGNORE_DEVICE}=""
+LABEL="waydroid_pen_restore_end"
+EOF
+sudo install -D -o root -g root -m 0644 "$clear_tmp" "$CLEAR_RULE"
+rm "$clear_tmp"
 sudo udevadm control --reload-rules
 for event_path in /sys/class/input/event*; do
     device_name=$(cat "$event_path/device/name" 2>/dev/null || true)
-    if [[ "$device_name" == "NVTCapacitivePenM80p" \
-            || "$device_name" == "NVTCapacitivePenP81c" \
-            || "$device_name" == "Xiaomi Focus Pen Pro Gestures" ]]; then
+    phys=$(cat "$event_path/device/phys" 2>/dev/null || true)
+    if [[ ( "$device_name" == "NVTCapacitivePenM80p" && "$phys" == "input/pen" ) \
+            || ( "$device_name" == "NVTCapacitivePenP81c" && "$phys" == "input/pen_p81c" ) \
+            || ( "$device_name" == "Xiaomi Focus Pen Pro Gestures" && "$phys" == "input/pen_p81c/gestures" ) ]]; then
+        sudo udevadm trigger --action=change "$event_path" || true
         sudo udevadm trigger --action=add "$event_path" || true
     fi
 done
 sudo udevadm settle || true
+sudo rm -f "$CLEAR_RULE"
+sudo udevadm control --reload-rules
 
 echo "Uninstalled waydroid-pen-bridge."
 echo "xiaomi-sheng-thp is left installed and running if it was already present."
-echo "Reboot recommended so libinput fully rediscovers the physical pen nodes."
-echo "After reboot, desktop pen input should come directly from THP again."
+echo "Physical THP pen nodes should be visible to libinput again."
+echo "Reboot still recommended so every desktop session fully rediscovers them."
