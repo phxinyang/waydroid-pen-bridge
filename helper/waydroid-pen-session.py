@@ -292,6 +292,38 @@ def relay_waydroid_focused(root_status):
     return focused if isinstance(focused, bool) else None
 
 
+def root_mapping(root_status):
+    relay = root_status.get("relay")
+    mapping = relay.get("mapping") if isinstance(relay, dict) else None
+    if mapping is None:
+        return None
+    if not isinstance(mapping, list) or len(mapping) != 4:
+        return None
+    try:
+        return tuple(float(value) for value in mapping)
+    except (TypeError, ValueError):
+        return None
+
+
+def context_mapping(context):
+    mapping = context.get("mapping")
+    if mapping is None:
+        return None
+    return tuple(float(value) for value in mapping)
+
+
+def routing_already_applied(policy, context, root_status):
+    desired = desired_mode(policy, context)
+    focused = desired_android_focus(context)
+    if root_status.get("mode") != desired:
+        return False
+    if relay_waydroid_focused(root_status) != focused:
+        return False
+    if desired == "direct" and root_mapping(root_status) != context_mapping(context):
+        return False
+    return True
+
+
 def apply_context(policy, context):
     mode = desired_mode(policy, context)
     focused = desired_android_focus(context)
@@ -319,6 +351,8 @@ def apply_verified_context(policy, context):
     for _attempt in range(3):
         before = query_root_status()
         before_instance = relay_instance(before)
+        if routing_already_applied(policy, context, before):
+            return desired, before_instance
         applied_mode = apply_context(policy, context)
         after = query_root_status()
         after_instance = relay_instance(after)

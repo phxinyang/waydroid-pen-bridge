@@ -180,6 +180,17 @@ def _side_link_target(config, relay):
     return None
 
 
+def _effective_active_pen(relay):
+    active = relay.get("active_pen")
+    if active in {"m80p", "p81c"}:
+        return active
+    # Before the first physical tip, prefer the Pro node when the gestures
+    # source is already present so direct-mode event4 is ready immediately.
+    if relay.get("pro_available"):
+        return "p81c"
+    return "m80p"
+
+
 def android_links(config, relay=None):
     """Return the desired event4/event5 links for a relay snapshot.
 
@@ -189,13 +200,13 @@ def android_links(config, relay=None):
     """
     relay = relay or {}
     targets = _pen_link_targets(config)
-    active = relay.get("active_pen")
+    active = _effective_active_pen(relay)
     pen_device, pen_target = targets.get(active, (None, None))
     pen_owned = {target for _device, target in targets.values()}
     # Migrate the previous one-device installation without treating it as a
     # foreign link.
     pen_owned.add(config.get("ANDROID_LINK_TARGET", "../waydroid_pen"))
-    side = _side_link_target(config, relay)
+    side = _side_link_target(config, dict(relay, active_pen=active))
     side_targets = {
         config.get("ANDROID_BUTTON_LINK_TARGET", "../waydroid_pen_buttons"),
         config.get("ANDROID_GESTURE_LINK_TARGET", "../waydroid_pen_gesture"),

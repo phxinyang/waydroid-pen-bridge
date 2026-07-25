@@ -165,6 +165,30 @@ class SwitchSafetyTests(unittest.TestCase):
         self.assertEqual(links[1]["link"], "/dev/input/event5")
         self.assertEqual(links[1]["target"], "../waydroid_pen_gesture")
 
+    def test_direct_links_fallback_when_active_pen_is_still_null(self):
+        pro_links = MODULE.android_links(
+            dict(MODULE.DEFAULTS),
+            {
+                "mode": "direct",
+                "active_pen": None,
+                "pro_available": True,
+                "android_button_active": False,
+            },
+        )
+        ordinary_links = MODULE.android_links(
+            dict(MODULE.DEFAULTS),
+            {
+                "mode": "direct",
+                "active_pen": None,
+                "pro_available": False,
+                "android_button_active": False,
+            },
+        )
+        self.assertEqual(pro_links[0]["target"], "../waydroid_pen_p81c")
+        self.assertEqual(pro_links[1]["target"], "../waydroid_pen_gesture")
+        self.assertEqual(ordinary_links[0]["target"], "../waydroid_pen_m80p")
+        self.assertIsNone(ordinary_links[1]["target"])
+
     def test_frozen_waydroid_container_remains_available(self):
         for state, expected in (
             ("RUNNING", True),

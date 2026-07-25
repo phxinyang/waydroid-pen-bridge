@@ -9,6 +9,7 @@ Item {
         String(Math.floor(Math.random() * 1000000))
     property bool overviewActive: false
     property var trackedWindow: null
+    property string lastSignature: ""
 
     function isWaydroidWindow(window) {
         if (!window)
@@ -57,12 +58,11 @@ Item {
         ];
     }
 
-    function contextToken() {
-        generation += 1;
+    function contextSignature() {
         const focused = isWaydroidWindow(Workspace.activeWindow) ? 1 : 0;
         const mapping = mappingForWindow(findWaydroidWindow());
         const parts = [
-            "ctx", sourceId, String(generation), String(focused),
+            String(focused),
             overviewActive ? "1" : "0",
         ];
         if (mapping) {
@@ -74,13 +74,25 @@ Item {
         return parts.join(".");
     }
 
+    function contextToken(signature) {
+        generation += 1;
+        return `ctx.${sourceId}.${generation}.${signature}`;
+    }
+
     function scheduleReport(delay) {
         reportTimer.interval = delay ?? 80;
         reportTimer.restart();
     }
 
     function reportContext() {
-        const unit = `waydroid-pen-session@${contextToken()}.service`;
+        // Only start a session unit when focus/overview/geometry actually
+        // changed.  Bumping generation on every timer tick flooded systemd
+        // with identical desktop applies and delayed real mode switches.
+        const signature = contextSignature();
+        if (signature === lastSignature)
+            return;
+        lastSignature = signature;
+        const unit = `waydroid-pen-session@${contextToken(signature)}.service`;
         startUnit.arguments = [unit, "replace"];
         startUnit.call();
     }
