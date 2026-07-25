@@ -495,6 +495,30 @@ class RelayTests(unittest.TestCase):
         self.assertGreater(len(relay.proxies[MODULE.MODEL_M80P].writes), 0)
         self.assertEqual(relay.android_proxies[MODULE.MODEL_M80P].writes, [])
 
+    def test_desktop_passthrough_writes_source_bytes_when_axes_match(self):
+        with tempfile.TemporaryDirectory() as directory:
+            relay = self.make_relay(Path(directory) / "state.json")
+            frame = pen_frame()
+            relay.forward(frame)
+
+        self.assertEqual(relay.proxies[MODULE.MODEL_M80P].writes, [frame])
+
+    def test_tip_change_does_not_rewrite_state_without_pending_mode(self):
+        with tempfile.TemporaryDirectory() as directory:
+            relay = self.make_relay(Path(directory) / "state.json")
+            with mock.patch.object(MODULE, "write_json_atomic") as write:
+                relay.forward(
+                    b"".join(
+                        (
+                            MODULE.make_event(MODULE.EV_KEY, MODULE.BTN_TOUCH, 1),
+                            MODULE.make_event(MODULE.EV_ABS, MODULE.ABS_PRESSURE, 100),
+                            MODULE.make_event(MODULE.EV_SYN, MODULE.SYN_REPORT, 0),
+                        )
+                    )
+                )
+        write.assert_not_called()
+        self.assertTrue(relay.tip_down)
+
     def test_direct_full_display_mapping_is_identity(self):
         with tempfile.TemporaryDirectory() as directory:
             relay = self.make_relay(Path(directory) / "state.json")

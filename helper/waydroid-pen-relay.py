@@ -827,6 +827,7 @@ class PenRelay:
         self.tip_down = False
         self.pending_mode = None
         self.mode_switch_count = 0
+        self._next_reconcile_ns = 0
         self.capability_generation = self._next_capability_generation()
         self.instance_id = uuid.uuid4().hex
 
@@ -1185,6 +1186,11 @@ class PenRelay:
         return False
 
     def _update_tip_state(self, data):
+        """Return (tip_changed, pending_mode_applied).
+
+        Tip-only transitions intentionally do not force a state.json rewrite;
+        that disk work sat on the pen hot path and added measurable latency.
+        """
         changed = False
         for offset in range(0, len(data), INPUT_EVENT.size):
             _s, _us, event_type, code, value = INPUT_EVENT.unpack_from(data, offset)
@@ -1200,8 +1206,15 @@ class PenRelay:
                     changed = True
         if changed and not self.tip_down and self.pending_mode is not None:
             self._apply_pending_mode()
-            return True
-        return changed
+            return True, True
+        return changed, False
+
+    def _desktop_can_passthrough(self, source, suppress):
+        # Raw source frames are already in native tablet space when Y is the
+        # stable 0..PEN_Y_MAX range and no buttons need filtering.
+        if suppress:
+            return False
+        return source["y_min"] == 0 and source["y_max"] == PEN_Y_MAX
 
     def _release_desktop_proxies(self):
         for proxy in self.proxies.values():
@@ -1321,7 +1334,7 @@ class PenRelay:
             return
         source = self.sources[model]
         profile = PEN_PROFILES[model]
-        tip_changed = self._update_tip_state(data)
+        _tip_changed, pending_applied = self._update_tip_state(data)
         self._update_ordinary_button_state(data)
         suppress = ()
         if model == MODEL_M80P:
@@ -1331,12 +1344,17 @@ class PenRelay:
             if self.ordinary_button_route != expected_route:
                 suppress = ORDINARY_BUTTON_CODES
         if self.mode == "desktop":
-            mapped = transform_pen_events(
-                data, source_y_min=source["y_min"], source_y_max=source["y_max"],
-                target_y_min=0, target_y_max=PEN_Y_MAX,
-                pressure_max=profile["pressure_max"], suppress_buttons=suppress,
-            )
-            self.proxies[model].write(mapped)
+            if self._desktop_can_passthrough(source, suppress):
+                # Hot path: no per-event unpack/repack when the source already
+                # matches the stable desktop proxy axis contract.
+                self.proxies[model].write(data)
+            else:
+                mapped = transform_pen_events(
+                    data, source_y_min=source["y_min"], source_y_max=source["y_max"],
+                    target_y_min=0, target_y_max=PEN_Y_MAX,
+                    pressure_max=profile["pressure_max"], suppress_buttons=suppress,
+                )
+                self.proxies[model].write(mapped)
         elif self.mode == "direct":
             mapper = self.mappers[model]
             mapper.set_source_range(source["y_min"], source["y_max"],
@@ -1344,7 +1362,7 @@ class PenRelay:
             mapper.feed(data, True, suppress_keys=suppress)
         if model == MODEL_M80P and self.ordinary_button_route == "android-button":
             self.android_button_proxy.feed(data, "ordinary")
-        if tip_changed:
+        if pending_applied:
             self._write_state()
 
     def forward_gesture(self, data):
@@ -1572,13 +1590,22 @@ class PenRelay:
 
     def run(self):
         while self.running:
-            try:
-                self._reconcile_sources()
-            except OSError:
-                for model in PEN_MODELS:
-                    self._close_source(model)
-                self._close_gesture_device()
-            for key, _ in self.selector.select(timeout=1.0):
+            now = time.monotonic_ns()
+            # Device discovery is not on the pen frame path; poll it on a timer
+            # instead of re-scanning sysfs before every selector wake.
+            if now >= self._next_reconcile_ns:
+                try:
+                    self._reconcile_sources()
+                except OSError:
+                    for model in PEN_MODELS:
+                        self._close_source(model)
+                    self._close_gesture_device()
+                # Missing sources need faster reconnect; stable setups can wait.
+                interval_ns = (
+                    200_000_000 if self.active_model is None else 1_000_000_000
+                )
+                self._next_reconcile_ns = now + interval_ns
+            for key, _ in self.selector.select(timeout=0.25):
                 if key.data == "control":
                     self._accept_command()
                 elif isinstance(key.data, tuple) and key.data[0] == "pen":
