@@ -173,12 +173,17 @@ sudo systemctl daemon-reload
 CLEAR_RULE=/etc/udev/rules.d/98-waydroid-pen-restore-thp.rules
 clear_tmp=$(mktemp)
 cat >"$clear_tmp" <<'EOF'
-SUBSYSTEM!="input", GOTO="waydroid_pen_restore_end"
-KERNEL!="event*", GOTO="waydroid_pen_restore_end"
-ATTRS{name}=="NVTCapacitivePenM80p", ATTRS{phys}=="input/pen", ENV{LIBINPUT_IGNORE_DEVICE}=""
-ATTRS{name}=="NVTCapacitivePenP81c", ATTRS{phys}=="input/pen_p81c", ENV{LIBINPUT_IGNORE_DEVICE}=""
-ATTRS{name}=="Xiaomi Focus Pen Pro Gestures", ATTRS{phys}=="input/pen_p81c/gestures", ENV{LIBINPUT_IGNORE_DEVICE}=""
-LABEL="waydroid_pen_restore_end"
+# Temporary rule used only during uninstall. Empty assignment is not always
+# enough to drop a previously set property on a live node, so force "0".
+ACTION=="add|change", SUBSYSTEM=="input", KERNEL=="event*", \
+  ATTRS{name}=="NVTCapacitivePenM80p", ATTRS{phys}=="input/pen", \
+  ENV{LIBINPUT_IGNORE_DEVICE}="0"
+ACTION=="add|change", SUBSYSTEM=="input", KERNEL=="event*", \
+  ATTRS{name}=="NVTCapacitivePenP81c", ATTRS{phys}=="input/pen_p81c", \
+  ENV{LIBINPUT_IGNORE_DEVICE}="0"
+ACTION=="add|change", SUBSYSTEM=="input", KERNEL=="event*", \
+  ATTRS{name}=="Xiaomi Focus Pen Pro Gestures", ATTRS{phys}=="input/pen_p81c/gestures", \
+  ENV{LIBINPUT_IGNORE_DEVICE}="0"
 EOF
 sudo install -D -o root -g root -m 0644 "$clear_tmp" "$CLEAR_RULE"
 rm "$clear_tmp"
@@ -189,8 +194,26 @@ for event_path in /sys/class/input/event*; do
     if [[ ( "$device_name" == "NVTCapacitivePenM80p" && "$phys" == "input/pen" ) \
             || ( "$device_name" == "NVTCapacitivePenP81c" && "$phys" == "input/pen_p81c" ) \
             || ( "$device_name" == "Xiaomi Focus Pen Pro Gestures" && "$phys" == "input/pen_p81c/gestures" ) ]]; then
-        sudo udevadm trigger --action=change "$event_path" || true
-        sudo udevadm trigger --action=add "$event_path" || true
+        # change+add is more reliable than only add for clearing sticky tags.
+        echo change | sudo tee "$event_path/uevent" >/dev/null || true
+        sudo udevadm trigger --action=change --sysname-match="$(basename "$event_path")" || true
+        sudo udevadm trigger --action=add --sysname-match="$(basename "$event_path")" || true
+    fi
+done
+sudo udevadm settle || true
+# Verify and, if still sticky, one more change pass before removing the rule.
+for event_path in /sys/class/input/event*; do
+    device_name=$(cat "$event_path/device/name" 2>/dev/null || true)
+    phys=$(cat "$event_path/device/phys" 2>/dev/null || true)
+    if [[ ( "$device_name" == "NVTCapacitivePenM80p" && "$phys" == "input/pen" ) \
+            || ( "$device_name" == "NVTCapacitivePenP81c" && "$phys" == "input/pen_p81c" ) \
+            || ( "$device_name" == "Xiaomi Focus Pen Pro Gestures" && "$phys" == "input/pen_p81c/gestures" ) ]]; then
+        dev="/dev/input/$(basename "$event_path")"
+        ign=$(udevadm info -q property -n "$dev" 2>/dev/null | sed -n 's/^LIBINPUT_IGNORE_DEVICE=//p' || true)
+        if [[ "$ign" == "1" ]]; then
+            echo change | sudo tee "$event_path/uevent" >/dev/null || true
+            sudo udevadm trigger --action=change --sysname-match="$(basename "$event_path")" || true
+        fi
     fi
 done
 sudo udevadm settle || true
