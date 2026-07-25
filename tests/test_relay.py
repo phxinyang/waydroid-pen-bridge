@@ -489,6 +489,44 @@ class RelayTests(unittest.TestCase):
         self.assertGreater(len(relay.proxies[MODULE.MODEL_M80P].writes), 0)
         self.assertEqual(relay.android_proxies[MODULE.MODEL_M80P].writes, [])
 
+    def test_direct_full_display_mapping_is_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            relay = self.make_relay(Path(directory) / "state.json")
+            relay.set_waydroid_focus(True)
+            relay.set_direct_mode(relay.capability_generation, False)
+            relay.set_mapping((0.0, 0.0, 1.0, 1.0))
+            frame = b"".join(
+                (
+                    MODULE.make_event(MODULE.EV_KEY, MODULE.BTN_TOOL_PEN, 1),
+                    MODULE.make_event(MODULE.EV_ABS, MODULE.ABS_X, 12345),
+                    MODULE.make_event(MODULE.EV_ABS, MODULE.ABS_Y, 6789),
+                    MODULE.make_event(MODULE.EV_ABS, MODULE.ABS_PRESSURE, 4321),
+                    MODULE.make_event(MODULE.EV_SYN, MODULE.SYN_REPORT, 0),
+                )
+            )
+            relay.forward(frame)
+
+        values = event_values(relay.android_proxies[MODULE.MODEL_M80P].writes)
+        self.assertIn((MODULE.EV_ABS, MODULE.ABS_X, 12345), values)
+        self.assertIn((MODULE.EV_ABS, MODULE.ABS_Y, 6789), values)
+        self.assertIn((MODULE.EV_ABS, MODULE.ABS_PRESSURE, 4321), values)
+
+    def test_mode_switch_releases_opposite_pen_proxies(self):
+        with tempfile.TemporaryDirectory() as directory:
+            relay = self.make_relay(Path(directory) / "state.json")
+            relay.set_waydroid_focus(True)
+            relay.set_direct_mode(relay.capability_generation, False)
+            relay.forward(pen_frame((MODULE.BTN_TOOL_PEN, 1)))
+            desktop_releases = relay.proxies[MODULE.MODEL_M80P].releases
+            android_releases = relay.android_proxies[MODULE.MODEL_M80P].releases
+            relay.set_desktop_mode()
+            after_desktop = relay.android_proxies[MODULE.MODEL_M80P].releases
+            relay.set_direct_mode(relay.capability_generation, False)
+            after_direct = relay.proxies[MODULE.MODEL_M80P].releases
+
+        self.assertGreater(after_desktop, android_releases)
+        self.assertGreater(after_direct, desktop_releases)
+
     def test_pressure_ranges_remain_native_per_pen_model(self):
         ordinary = MODULE.transform_pen_events(
             b"".join(

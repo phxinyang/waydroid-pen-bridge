@@ -762,10 +762,24 @@ class AndroidFrameMapper:
             self.output.release_buttons()
 
     def _map_point(self, x, y):
+        geometry = self.geometry
+        # Full-display mapping used to go through float normalize/expand and
+        # re-quantize every sample.  That alone makes Waydroid writing feel
+        # softer and less precise than the desktop proxy path.
+        if geometry is None or geometry == (0.0, 0.0, 1.0, 1.0):
+            if (self.source_y_min != self.output_y_min or
+                    self.source_y_max != self.output_y_max):
+                y = map_axis_value(
+                    y, self.source_y_min, self.source_y_max,
+                    self.output_y_min, self.output_y_max,
+                )
+            return (
+                min(self.X_MAX, max(self.X_MIN, x)),
+                min(self.output_y_max, max(self.output_y_min, y)),
+            )
         source_x = (x - self.X_MIN) / (self.X_MAX - self.X_MIN)
         source_y = (y - self.source_y_min) / (
             self.source_y_max - self.source_y_min)
-        geometry = self.geometry or (0.0, 0.0, 1.0, 1.0)
         left, top, width, height = geometry
         if not (left <= source_x <= left + width):
             return None
@@ -1152,10 +1166,22 @@ class PenRelay:
                 return True
         return False
 
+    def _release_desktop_proxies(self):
+        for proxy in self.proxies.values():
+            proxy.release()
+
+    def _release_android_pen_paths(self):
+        for mapper in self.mappers.values():
+            mapper.reset_source_state()
+        for proxy in self.android_proxies.values():
+            if hasattr(proxy, "release"):
+                proxy.release()
+
     def set_desktop_mode(self):
-        if self.mode == "direct" and self.active_model is not None:
-            self.mappers[self.active_model].reset_source_state()
-            self.proxies[self.active_model].release()
+        if self.mode == "direct":
+            # Leaving direct must clear every Android pen tip before desktop
+            # frames resume, including the inactive model proxy.
+            self._release_android_pen_paths()
         self.mode = "desktop"
         self._reroute_ordinary_buttons()
         if self.android_pro_active and not self._android_pro_should_be_active():
@@ -1167,9 +1193,11 @@ class PenRelay:
 
     def set_direct_mode(self, generation, pro_available):
         self._require_capability(generation, pro_available)
-        if self.mode != "direct" and self.active_model is not None:
-            self.proxies[self.active_model].release()
-            self.mappers[self.active_model].reset_source_state()
+        if self.mode != "direct":
+            # Drop any held desktop tip so only the hidden Android proxies
+            # carry the next stroke.
+            self._release_desktop_proxies()
+            self._release_android_pen_paths()
         self.mode = "direct"
         self._reroute_ordinary_buttons()
         self._set_android_pro_active(
