@@ -170,57 +170,53 @@ sudo systemctl daemon-reload
 # udev keeps previously assigned properties on live nodes until a rule clears
 # them.  After removing the bridge ignore rules, explicitly unset
 # LIBINPUT_IGNORE_DEVICE on the physical THP pen/gesture sources.
-CLEAR_RULE=/etc/udev/rules.d/98-waydroid-pen-restore-thp.rules
-clear_tmp=$(mktemp)
-cat >"$clear_tmp" <<'EOF'
-# Temporary rule used only during uninstall. Empty assignment is not always
-# enough to drop a previously set property on a live node, so force "0".
-ACTION=="add|change", SUBSYSTEM=="input", KERNEL=="event*", \
-  ATTRS{name}=="NVTCapacitivePenM80p", ATTRS{phys}=="input/pen", \
-  ENV{LIBINPUT_IGNORE_DEVICE}="0"
-ACTION=="add|change", SUBSYSTEM=="input", KERNEL=="event*", \
-  ATTRS{name}=="NVTCapacitivePenP81c", ATTRS{phys}=="input/pen_p81c", \
-  ENV{LIBINPUT_IGNORE_DEVICE}="0"
-ACTION=="add|change", SUBSYSTEM=="input", KERNEL=="event*", \
-  ATTRS{name}=="Xiaomi Focus Pen Pro Gestures", ATTRS{phys}=="input/pen_p81c/gestures", \
-  ENV{LIBINPUT_IGNORE_DEVICE}="0"
-EOF
-sudo install -D -o root -g root -m 0644 "$clear_tmp" "$CLEAR_RULE"
-rm "$clear_tmp"
+# Live udev nodes keep previously assigned ENV values after the setting rule is
+# deleted.  The reliable cleanup is: no bridge ignore rules left, then recreate
+# the physical THP devices so they are enumerated cleanly for libinput.
 sudo udevadm control --reload-rules
-for event_path in /sys/class/input/event*; do
-    device_name=$(cat "$event_path/device/name" 2>/dev/null || true)
-    phys=$(cat "$event_path/device/phys" 2>/dev/null || true)
-    if [[ ( "$device_name" == "NVTCapacitivePenM80p" && "$phys" == "input/pen" ) \
-            || ( "$device_name" == "NVTCapacitivePenP81c" && "$phys" == "input/pen_p81c" ) \
-            || ( "$device_name" == "Xiaomi Focus Pen Pro Gestures" && "$phys" == "input/pen_p81c/gestures" ) ]]; then
-        # change+add is more reliable than only add for clearing sticky tags.
-        echo change | sudo tee "$event_path/uevent" >/dev/null || true
-        sudo udevadm trigger --action=change --sysname-match="$(basename "$event_path")" || true
-        sudo udevadm trigger --action=add --sysname-match="$(basename "$event_path")" || true
-    fi
-done
-sudo udevadm settle || true
-# Verify and, if still sticky, one more change pass before removing the rule.
-for event_path in /sys/class/input/event*; do
-    device_name=$(cat "$event_path/device/name" 2>/dev/null || true)
-    phys=$(cat "$event_path/device/phys" 2>/dev/null || true)
-    if [[ ( "$device_name" == "NVTCapacitivePenM80p" && "$phys" == "input/pen" ) \
-            || ( "$device_name" == "NVTCapacitivePenP81c" && "$phys" == "input/pen_p81c" ) \
-            || ( "$device_name" == "Xiaomi Focus Pen Pro Gestures" && "$phys" == "input/pen_p81c/gestures" ) ]]; then
-        dev="/dev/input/$(basename "$event_path")"
-        ign=$(udevadm info -q property -n "$dev" 2>/dev/null | sed -n 's/^LIBINPUT_IGNORE_DEVICE=//p' || true)
-        if [[ "$ign" == "1" ]]; then
-            echo change | sudo tee "$event_path/uevent" >/dev/null || true
-            sudo udevadm trigger --action=change --sysname-match="$(basename "$event_path")" || true
+if systemctl cat xiaomi-sheng-thp.service >/dev/null 2>&1; then
+    # Restart only the driver service.  It remains enabled/installed; this just
+    # rebuilds M80p/P81c (and optional gestures) without LIBINPUT_IGNORE tags.
+    sudo systemctl restart xiaomi-sheng-thp.service || true
+    # Wait briefly for driver nodes to reappear.
+    for ((i=0; i<50; i++)); do
+        if [[ -e /dev/input/waydroid-pen || -e /sys/class/input ]]; then
+            m80p_ok=0
+            p81c_ok=0
+            for event_path in /sys/class/input/event*; do
+                device_name=$(cat "$event_path/device/name" 2>/dev/null || true)
+                phys=$(cat "$event_path/device/phys" 2>/dev/null || true)
+                if [[ "$device_name" == "NVTCapacitivePenM80p" && "$phys" == "input/pen" ]]; then
+                    m80p_ok=1
+                fi
+                if [[ "$device_name" == "NVTCapacitivePenP81c" && "$phys" == "input/pen_p81c" ]]; then
+                    p81c_ok=1
+                fi
+            done
+            if [[ "$m80p_ok" -eq 1 && "$p81c_ok" -eq 1 ]]; then
+                break
+            fi
         fi
-    fi
-done
-sudo udevadm settle || true
-sudo rm -f "$CLEAR_RULE"
-sudo udevadm control --reload-rules
+        sleep 0.1
+    done
+    for event_path in /sys/class/input/event*; do
+        device_name=$(cat "$event_path/device/name" 2>/dev/null || true)
+        phys=$(cat "$event_path/device/phys" 2>/dev/null || true)
+        if [[ ( "$device_name" == "NVTCapacitivePenM80p" && "$phys" == "input/pen" ) \
+                || ( "$device_name" == "NVTCapacitivePenP81c" && "$phys" == "input/pen_p81c" ) \
+                || ( "$device_name" == "Xiaomi Focus Pen Pro Gestures" && "$phys" == "input/pen_p81c/gestures" ) ]]; then
+            sudo udevadm trigger --action=add --sysname-match="$(basename "$event_path")" || true
+        fi
+    done
+    sudo udevadm settle || true
+fi
+
+# Best-effort leftover cleanup from older experimental installs.
+sudo rm -f /etc/udev/rules.d/98-waydroid-pen-restore-thp.rules \
+    /etc/udev/rules.d/99-waydroid-pen-mode.rules.bak \
+    /etc/udev/rules.d/99-waydroid-pen-mode.rules.bak.* 2>/dev/null || true
 
 echo "Uninstalled waydroid-pen-bridge."
-echo "xiaomi-sheng-thp is left installed and running if it was already present."
+echo "xiaomi-sheng-thp is left installed; it was restarted to restore clean pen nodes."
 echo "Physical THP pen nodes should be visible to libinput again."
 echo "Reboot still recommended so every desktop session fully rediscovers them."
