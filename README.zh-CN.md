@@ -216,25 +216,6 @@ sudo /usr/local/libexec/waydroid-pen-mode unmap
 
 ## 架构
 
-```text
-            xiaomi-sheng-thp
-                    │
-                    ▼
-         waydroid-pen-relay
-                    │
-         ┌──────────┴──────────┐
-         ▼                     ▼
- Linux uinput            Waydroid event4/5
-         ▲                     ▲
-         └──── waydroid-pen-mode ────┘
-                    ▲
-                    │
-          waydroid-pen-session
-                    ▲
-                    │
-      GNOME Extension / KDE Tray
-```
-
 | 组件 | 作用 |
 |------|------|
 | `waydroid-pen-relay` | root 数据面：读 THP → uinput 代理；控制套接字 |

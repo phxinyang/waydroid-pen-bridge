@@ -232,25 +232,6 @@ reboot is still recommended so every session rediscovers devices cleanly.
 
 ## Architecture
 
-```text
-            xiaomi-sheng-thp
-                    │
-                    ▼
-         waydroid-pen-relay
-                    │
-         ┌──────────┴──────────┐
-         ▼                     ▼
- Linux uinput            Waydroid event4/5
-         ▲                     ▲
-         └──── waydroid-pen-mode ────┘
-                    ▲
-                    │
-          waydroid-pen-session
-                    ▲
-                    │
-      GNOME Extension / KDE Tray
-```
-
 | Component | Role |
 |-----------|------|
 | `waydroid-pen-relay` | Root data plane: read THP → uinput proxies; control socket |
