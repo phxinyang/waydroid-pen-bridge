@@ -5,18 +5,14 @@
 在**不从合成器热拔笔设备**的前提下，把小米平板 6S Pro（`sheng`）触控笔在
 **Linux 桌面**与 **Waydroid** 之间路由。
 
-```text
-THP 驱动（M80p / P81c [ / Pro 手势]）
-        │
-        ▼
- waydroid-pen-relay   ← 双笔型常驻代理 + 可选手势代理
-        │
-   ┌────┴────┐
- 桌面      Android（经 LXC 笔节点）
-```
+[THP 驱动](https://github.com/ianchb/xiaomi-sheng-thp) 提供 M80p、P81c 以及可选的
+Pro 手势节点。**waydroid-pen-relay** 读取这些源，维护双笔型稳定代理（以及可选的
+手势代理）。之后笔迹按当前策略与焦点，进入**桌面**输入栈，或经 LXC 挂载进入
+**Android**。
 
-物理驱动节点会被 libinput ignore。relay 为每种笔型保持**一个常驻代理**，只把正在
-出帧的型号设为 active，并在有 Pro 手势源时创建手势代理。触摸屏仍走 Wayland。
+物理驱动节点会被 libinput ignore，桌面只认代理。relay 为每种笔型保持**一个常驻
+代理**，只把正在出帧的型号设为 active，并在 Pro 手势源存在时创建手势代理。触摸屏
+仍走 Wayland。
 
 ## 先分清两层概念
 
@@ -25,15 +21,8 @@ THP 驱动（M80p / P81c [ / Pro 手势]）
 | **策略 Policy**（托盘 / 快速设置） | 你 | `auto` · `waydroid` · `desktop` | 长期偏好 |
 | **运行模式 Runtime**（relay） | session + 策略 | `desktop` · `direct` | **笔坐标**当前去哪 |
 
-```text
-策略（自动 / Waydroid / 桌面）
-        │
-        ▼
-Session（焦点、Overview、粘性、抬笔再切）
-        │
-        ▼
-运行模式：desktop 或 direct
-```
+流程：托盘选**策略** → **session** 结合焦点、Overview、粘性与抬笔安全 → relay
+落在 **`desktop` 或 `direct`**。
 
 ## 策略（托盘）
 

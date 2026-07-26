@@ -5,19 +5,16 @@ English | [简体中文](README.zh-CN.md)
 Route the Xiaomi Pad 6S Pro (`sheng`) stylus between the **Linux desktop** and
 **Waydroid** without hot-removing the tablet device from the compositor.
 
-```text
-THP driver (M80p / P81c [/ Pro gestures])
-        │
-        ▼
- waydroid-pen-relay   ← stable dual proxies + optional gesture proxy
-        │
-   ┌────┴────┐
-desktop    Android (via LXC event nodes)
-```
+The [THP driver](https://github.com/ianchb/xiaomi-sheng-thp) exposes M80p, P81c,
+and optional Pro gesture nodes. **waydroid-pen-relay** reads those sources and
+feeds stable dual-model proxies (plus an optional gesture proxy). From there,
+pen traffic goes either to the **desktop** stack or into **Android** through LXC
+input mounts—whichever the current policy and focus require.
 
-Physical driver nodes are ignored by libinput. The relay keeps **one resident
-proxy per pen model**, activates the model that is producing frames, and
-(optionally) creates Pro gesture proxies. Touchscreen input stays on Wayland.
+Physical driver nodes are ignored by libinput so the desktop only sees the
+proxies. The relay keeps **one resident proxy per pen model**, activates the
+model that is producing frames, and creates Pro gesture proxies only while that
+source exists. Touchscreen input stays on Wayland.
 
 ## Concepts (read this first)
 
@@ -28,15 +25,9 @@ Two layers are easy to confuse:
 | **Policy** (tray / Quick Settings) | You | `auto` · `waydroid` · `desktop` | Long-lived preference |
 | **Runtime mode** (relay) | Session + policy | `desktop` · `direct` | Where **pen coordinates** go right now |
 
-```text
-Policy (auto / waydroid / desktop)
-        │
-        ▼
-Session (focus, Overview, sticky, tip-safe)
-        │
-        ▼
-Runtime mode:  desktop  or  direct
-```
+Flow: choose a **policy** in the tray → the **session** applies focus, Overview,
+sticky timing, and tip-safe switching → the relay runs in **`desktop` or
+`direct`**.
 
 ## Policies (tray)
 
