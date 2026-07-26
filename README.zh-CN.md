@@ -2,157 +2,132 @@
 
 [English](README.md) | 简体中文
 
-在**不从合成器热拔笔设备**的前提下，把小米平板 6S Pro（`sheng`）触控笔在
-**Linux 桌面**与 **Waydroid** 之间路由。
+**一个托盘开关，让笔同时在 Linux 和 Waydroid 里正常工作，不用顾此失彼。**
 
-[THP 驱动](https://github.com/ianchb/xiaomi-sheng-thp) 提供 M80p、P81c 以及可选的
-Pro 手势节点。**waydroid-pen-relay** 读取这些源，维护双笔型稳定代理（以及可选的
-手势代理）。之后笔迹按当前策略与焦点，进入**桌面**输入栈，或经 LXC 挂载进入
-**Android**。
+我在小米平板 6S Pro（`sheng`）上日常跑 Linux + Waydroid 记笔记。
+Waydroid 里写字不应牺牲桌面笔体验，切换也不该像在走钢丝。
 
-物理驱动节点会被 libinput ignore，桌面只认代理。relay 为每种笔型保持**一个常驻
-代理**，只把正在出帧的型号设为 active，并在 Pro 手势源存在时创建手势代理。触摸屏
-仍走 Wayland。
+于是做了一个薄 relay：夹在 [THP
+驱动](https://github.com/ianchb/xiaomi-sheng-thp) 和系统中间，
+给两侧各配一套稳定代理，快到体感上你很可能感觉不到它在那。
 
-## 先分清两层概念
+## 快速上手
 
-| 层级 | 谁设置 | 取值 | 含义 |
-|------|--------|------|------|
-| **策略 Policy**（托盘 / 快速设置） | 你 | `auto` · `waydroid` · `desktop` | 长期偏好 |
-| **运行模式 Runtime**（relay） | session + 策略 | `desktop` · `direct` | **笔坐标**当前去哪 |
-
-流程：托盘选**策略** → **session** 结合焦点、Overview、粘性与抬笔安全 → relay
-落在 **`desktop` 或 `direct`**。
-
-## 策略（托盘）
-
-GNOME 快速设置与 KDE 系统托盘提供同一套三策略（文案随语言：Auto/Waydroid/Desktop
-或 自动/Waydroid/桌面）。
-
-| 策略 | 笔坐标 | 按键 / Pro 手势 |
-|------|--------|-----------------|
-| **自动** | Waydroid 为有效焦点时 `direct`，否则 `desktop` | 与下表焦点规则一致 |
-| **Waydroid** | **始终** `direct`（坐标进 Android） | 侧键/手势侧通道仍常要求 Waydroid 聚焦 |
-| **桌面** | **始终** `desktop`（坐标进 Linux 代理） | Waydroid 聚焦时：普通笔键与 Pro 手势可走 **Android 侧通道**，坐标仍留在桌面 |
-
-**自动策略补充**
-
-- Overview 打开时强制走桌面路径。  
-- 焦点有防抖与短时 **粘性**，减少误切。  
-- 模式切换尽量 **抬笔安全**（tip-safe）：必要时等抬笔再落地。
-
-**策略不是什么**
-
-- 托盘里不会出现 `direct` 这个词（那是 runtime）。  
-- 不负责 Notein/Starnote 等应用动作（应在 Android 兼容模块里）。
-
-## 运行模式（relay）
-
-| 模式 | 笔坐标 | 普通笔按键（M80p） | Pro 手势（P81c） |
-|------|--------|-------------------|------------------|
-| **desktop** | 宿主桌面代理 | 桌面代理；Waydroid 聚焦时可改走 Android `event5` 侧通道 | 桌面手势代理，或按焦点走 Android 手势路径 |
-| **direct** | Android `event4` → 当前 active 型号代理 | 聚焦时在笔节点（`event4`）上；**不**再双写到 `event5` | 有 Pro 源时在 `event5`；聚焦时 Android 映射为 194–197 |
-
-共同规则：
-
-- 切模式时双型号代理保持存活（不销毁重建 thrash）。  
-- `event4` **仅**在 direct 存在，并指向 **当前 active** 型号。  
-- `event5` 仅在侧通道需要时建立。  
-- **同一按键帧只进一个目标**，从不双发。  
-- 失焦或进 Overview 会先释放 Android 侧按下的笔键。  
-- 落在 Waydroid 内容矩形外的笔采样不会进 Android（几何由 GNOME/KWin 上报）。
-
-### 压感与轴
-
-| 型号 | 压感 | 说明 |
-|------|------|------|
-| M80p | `0..8191` | `BTN_STYLUS` / `BTN_STYLUS2` |
-| P81c | `0..16383` | 可选 brake；Pro 手势是**独立**设备 |
-
-Y 按当前 source 真实范围映射到稳定平板范围，**不改变**压感契约。
-
-### Android 按键传输（不是应用逻辑）
-
-keylayout 只做传输换码：
-
-| 来源 | 扫描码 | Android 键码（常见） |
-|------|--------|----------------------|
-| 普通笔 / M80p–P81c 笔节点 | 331 / 332 | 194 / 195 |
-| Pro 手势设备 | 262–265（`BTN_6`…`BTN_9`） | 194–197 |
-
-P81c 笔迹本身不会“造出” 194/195。应用动作由
-`xiaomi-penengine-compat` 一类模块处理，本仓库不包含应用专用逻辑。
-
-## 运行要求
-
-- GNOME Shell 50 **或** KDE Plasma 6 / KWin 6  
-- Waydroid 1.6.x  
-- Python 3  
-- `sudo`、`systemd`、`udevadm`、`visudo`、LXC  
-- [`xiaomi-sheng-thp`](https://github.com/ianchb/xiaomi-sheng-thp)：M80p/P81c
-  `2717:3654`，可选 Pro 手势 `0022:5081`
-
-## 安装
-
-### GitHub Release（RPM / DEB）
-
-打 `v*` 标签后 Actions 构建并挂到
-[Releases](https://github.com/phxinyang/waydroid-pen-bridge/releases)。
+确保 [`xiaomi-sheng-thp`](https://github.com/ianchb/xiaomi-sheng-thp) 已装好
+并在跑。然后：
 
 ```bash
-# Fedora 等
-sudo dnf install ./waydroid-pen-bridge-*.noarch.rpm
+# 下 Release 里的包（RPM / DEB）
+sudo dnf install ./waydroid-pen-bridge-*.noarch.rpm   # Fedora 类
+sudo apt install ./waydroid-pen-bridge_*.deb           # Debian/Ubuntu
 
-# Debian / Ubuntu
-sudo apt install ./waydroid-pen-bridge_*.deb
-```
+# 或者源码装
+./install.sh
 
-图形登录后若没有托盘/扩展：
-
-```bash
+# 重启一次，登录后若没看到托盘图标：
 waydroid-pen-bridge-user-setup
 ```
 
-### 源码安装
+托盘会出现 **自动 / Waydroid / 桌面** 三个选项。日常切到需要的，接着写就行。
+
+卸载：
 
 ```bash
-./install.sh
+./uninstall.sh
 ```
 
-两种方式都需要 Waydroid LXC 配置，以及正常的 **xiaomi-sheng-thp**。
-本项目**不**替换/卸载 THP，只 ignore 物理节点并经代理转发。
+不论当初是 rpm、deb 还是 `install.sh` 装的，都能卸干净。不会动 THP。
 
-**首次安装后建议重启一次**，让 udev 在登录前隐藏物理笔，并尽早拉起稳定代理。
+## 它是怎么工作的
 
-`install.sh` 会尽量配置用户 UI。若仍没有面板：
+THP 驱动提供 M80p、P81c 和可选的 Pro 手势设备。我的 relay 把它们从桌面
+隐藏掉，避免两方抢同一个物理节点。然后为每种笔型建**常驻代理**——Linux 一套，
+Android 一套——再按托盘选的状态决定走哪边。
 
-```bash
-./user-setup.sh
-# 或：waydroid-pen-bridge-user-setup
-```
+有两个概念容易搞混：
 
-- **GNOME：** 按需启用扩展 `Waydroid Pen Mode`  
-- **KDE：** 系统托盘 → 条目 → Waydroid Pen Mode → **显示**
+| 是什么 | 在哪看到 | 含义 |
+|--------|----------|------|
+| **策略** | 托盘 / 快速设置 | `auto` / `waydroid` / `desktop`，你长期选的偏好 |
+| **运行模式** | relay 内部 | `desktop` / `direct`，笔坐标当前实际去哪 |
 
-### 查看状态
+策略 → session（焦点、Overview、粘性、抬笔安全）→ 运行模式。托盘选「自动」，
+session 根据当下情况决定是 `desktop` 还是 `direct`。
+
+### 三种策略干了什么
+
+**自动**——我推荐日常用。跟随 Waydroid 焦点：Waydroid 为活动窗口时走 direct，
+否则留在桌面。Overview 打开时强制桌面。焦点有防抖、有短时粘性，不会一抖就切。
+需要时会等抬笔再换模式。
+
+**Waydroid**——笔坐标始终进 Android。但侧键和 Pro 手势侧通道仍常要求
+Waydroid 窗口聚焦。
+
+**桌面**——笔坐标始终留在 Linux。不过 Waydroid 聚焦时，普通笔按钮和 Pro
+手势可以走一条独立的 Android 侧通道，让你的按键在 Waydroid 应用里生效，
+同时笔坐标不动。
+
+### 运行模式：desktop vs direct
+
+| 模式 | 笔坐标 | M80p 按键 | P81p Pro 手势 |
+|------|--------|-----------|---------------|
+| **desktop** | 桌面代理 | 桌面代理，或 Waydroid 聚焦时走 Android `event5` 侧通道 | 桌面手势代理，聚焦时走 Android 手势路径 |
+| **direct** | Android `event4`（当前 active 型号） | 在笔节点上；不会双发到 `event5` | Android `event5`；聚焦时扫测码映射为 194–197 |
+
+### 压感与按键（简短版）
+
+M80p 压感 `0..8191`，带 `BTN_STYLUS`/`BTN_STYLUS2`。P81c 压感 `0..16383`，
+可选 brake，Pro 手势是独立设备。Y 从真实 source 范围映射到稳定平板空间，
+不碰压感契约。
+
+本 bridge 只负责把按键事件送到位，不指定 Starnote / Notein 这些应用具体
+做什么。那是 [`xiaomi-penengine-compat`](https://github.com/phxinyang) 的事。
+
+### 一个按键只进一个门
+
+每个按键帧只落一个目标：桌面焦点 → 桌面代理；普通笔聚焦 direct → `event4`；
+桌面 + 聚焦侧通道 → `event5`。不会同一帧双发。
+
+### GNOME 和 KDE 都能用
+
+托盘 / 快速设置是一样的三种策略。KWin 脚本和 GNOME 扩展负责把窗口几何和
+焦点变化交给 session，relay 就知道 Waydroid 目前在屏幕哪个位置、是不是
+焦点窗口。落在 Waydroid 内容矩形外的笔采样不会进 Android。
+
+## 运行要求
+
+- 一块跑 Fedora 的 sheng（或类似，需 GNOME 50+ / KDE Plasma 6）
+- Waydroid 1.6.x
+- [`xiaomi-sheng-thp`](https://github.com/ianchb/xiaomi-sheng-thp)（提供 M80p/P81c，可选 Pro 手势）
+- Python 3、`sudo`、`systemd`、LXC
+
+## 翻开看看
+
+四块东西，平时你只跟托盘打交道：
+
+| 组件 | 身份 | 做的事 |
+|------|------|--------|
+| `waydroid-pen-relay` | root | 读 THP、写 uinput 代理、管理控制 socket |
+| `waydroid-pen-mode` | root | desktop/direct 切换、focus、map、LXC `event4`/`event5` |
+| `waydroid-pen-session` | user | 策略 + 上下文 → 调 mode helper |
+| 托盘 / 扩展 | 桌面 | GNOME Quick Settings 或 KDE 托盘切换 |
+
+出问题的话，先看这个：
 
 ```bash
 sudo /usr/local/libexec/waydroid-pen-mode status
 ```
 
-底层运行时接口（日常请用托盘策略；一般由 session 自动调用）：
+底层的调试接口（一般不需要手动用）：
 
 ```bash
 sudo /usr/local/libexec/waydroid-pen-mode desktop
 sudo /usr/local/libexec/waydroid-pen-mode direct
-sudo /usr/local/libexec/waydroid-pen-mode sync
 sudo /usr/local/libexec/waydroid-pen-mode focus 1
 sudo /usr/local/libexec/waydroid-pen-mode focus 0
 sudo /usr/local/libexec/waydroid-pen-mode map X Y WIDTH HEIGHT
 sudo /usr/local/libexec/waydroid-pen-mode unmap
 ```
-
-安装程序会打开 Android 内置防误触开关，在 Waydroid 容器下次启动后生效。
 
 ## 卸载
 
@@ -160,27 +135,16 @@ sudo /usr/local/libexec/waydroid-pen-mode unmap
 ./uninstall.sh
 ```
 
-若当初用 **rpm/dnf** 或 **deb/apt** 安装，`uninstall.sh` 会检测并用包管理器卸包，
-再清桌面 UI 并打印自检清单；纯 `install.sh` 安装则走文件清理路径。
+若当初是 rpm/deb 装的，脚本会用包管理器卸包，再清桌面 UI 并打印自检清单。
+`install.sh` 装的会走文件清理。无论哪种，THP 都在。
 
-只卸 **bridge**：
+## 关于延迟
 
-- 停 relay / link-sync  
-- udev、helper、LXC 笔挂载、Android overlay KL/KCM  
-- GNOME 扩展与 KDE 托盘/KWin 脚本  
-- **保留** [xiaomi-sheng-thp](https://github.com/ianchb/xiaomi-sheng-thp)
+桌面场景，relay 的 host 侧开销大概 **p50 ~0.04 ms**（Rust 版）。
+Waydroid 笔记感觉钝，大头在 Android 输入栈和 App 本身，不是这个桥。
 
-会重启 THP，以重建不带 `LIBINPUT_IGNORE_DEVICE` 的物理笔。仍建议再重启一次会话。
-
-## 架构（简）
-
-| 组件 | 作用 |
-|------|------|
-| `waydroid-pen-relay` | root 数据面：读 THP → uinput 代理；控制套接字 |
-| `waydroid-pen-mode` | root 控制：desktop/direct、focus、map、LXC event4/5 |
-| `waydroid-pen-session` | 用户会话：策略 + 焦点/Overview → 调 mode |
-| GNOME 扩展 / KDE 托盘 + KWin 脚本 | UI + 窗口几何/焦点 |
+对实现好奇的话，可以看 `rust-rewrite` 分支上的 Rust 数据面。
 
 ## 许可证
 
-见 [LICENSE](LICENSE)。
+MIT — [LICENSE](LICENSE)
