@@ -2,94 +2,118 @@
 
 English | [简体中文](README.zh-CN.md)
 
-Routes the Xiaomi Pad 6S Pro (`sheng`) pen between the desktop and Waydroid
-without hot-removing a tablet device from the compositor.
+Route the Xiaomi Pad 6S Pro (`sheng`) stylus between the **Linux desktop** and
+**Waydroid** without hot-removing the tablet device from the compositor.
 
-The driver-created M80p and P81c pen devices are ignored by libinput. A small
-system service keeps one stable proxy for each model, selects the source that
-is actually producing frames, and creates an optional Pro gesture proxy.
+```text
+THP driver (M80p / P81c [/ Pro gestures])
+        │
+        ▼
+ waydroid-pen-relay   ← stable dual proxies + optional gesture proxy
+        │
+   ┌────┴────┐
+desktop    Android (via LXC event nodes)
+```
 
-## Policies
+Physical driver nodes are ignored by libinput. The relay keeps **one resident
+proxy per pen model**, activates the model that is producing frames, and
+(optionally) creates Pro gesture proxies. Touchscreen input stays on Wayland.
 
-The GNOME Quick Settings menu and KDE Plasma System Tray provide the same three
-policies:
+## Concepts (read this first)
 
-- **Auto:** follow the focused window.
-- **Waydroid:** always send the physical evdev pen coordinates to Android. Pen
-  button events still require a focused Waydroid window.
-- **Desktop:** always forward the physical pen to the stable desktop proxy. When a
-  Waydroid window is focused, ordinary pen buttons and Focus Pen Pro gestures
-  use a separate Android side channel without changing the pen-coordinate
-  route.
+Two layers are easy to confuse:
 
-Screen touch continues through Wayland. The bridge preserves ordinary
-`BTN_STYLUS`/`BTN_STYLUS2` and Pro `BTN_6` through `BTN_9` codes on Linux. It
-does not assign application actions to them. The M80p proxy advertises native
-pressure `0..8191`, and the P81c proxy advertises native pressure `0..16383`.
-The source Y range is mapped to the stable tablet Y range without changing
-either pressure range or destroying a proxy during a pen switch.
+| Layer | Who sets it | Values | Meaning |
+|-------|-------------|--------|---------|
+| **Policy** (tray / Quick Settings) | You | `auto` · `waydroid` · `desktop` | Long-lived preference |
+| **Runtime mode** (relay) | Session + policy | `desktop` · `direct` | Where **pen coordinates** go right now |
 
-The installer also enables Android's built-in palm rejection flag inside
-Waydroid. It takes effect the next time the Waydroid container starts.
+```text
+Policy (auto / waydroid / desktop)
+        │
+        ▼
+Session (focus, Overview, sticky, tip-safe)
+        │
+        ▼
+Runtime mode:  desktop  or  direct
+```
 
-## Runtime modes
+## Policies (tray)
 
-- **Desktop:** an ordinary pen keeps its standard buttons and Focus Pen Pro
-  keeps `BTN_6`/`BTN_7`/`BTN_8`/`BTN_9` unchanged on the desktop proxies.
-  Android `event4` is absent. While a Waydroid window has focus, the active
-  pen's button path is routed through Android `event5` instead of the desktop
-  button destination.
-- **Direct with an ordinary pen:** Android `event4` points at the pen proxy and
-  keeps `BTN_STYLUS`/`BTN_STYLUS2` while the Waydroid window is focused.
-  Android `event5` is not linked for ordinary-button transport in direct mode.
-- **Direct with Focus Pen Pro:** P81c pen frames use `event4`. The separate Pro
-  gesture source keeps scan codes 262, 263, 264, and 265 (`BTN_6` through
-  `BTN_9`) on `event5`. Android maps them to key codes 194 through 197 while
-  the host Waydroid window has focus.
+GNOME Quick Settings and the KDE System Tray expose the same three policies
+(labels follow locale: Auto / Waydroid / Desktop, or 自动 / Waydroid / 桌面).
 
-The two model pen proxies remain stable while changing modes. Android `event4`
-exists only in direct mode and points at the current active model. Android
-`event5` is linked only when the focused side channel needs it; the Pro proxy
-is created only while the physical Pro gestures source exists. Losing focus or
-entering an Overview releases all active Android pen buttons before further
-routing changes.
+| Policy | Coordinates | Buttons / Pro gestures |
+|--------|-------------|-------------------------|
+| **Auto** | `direct` while a Waydroid window is the effective focus; otherwise `desktop` | Follow the same focus rules as below |
+| **Waydroid** | Always `direct` (Android gets pen XY) | Still need Waydroid focus for button / gesture side channels where applicable |
+| **Desktop** | Always `desktop` (Linux proxy gets pen XY) | If Waydroid is focused: ordinary buttons + Pro gestures can use an **Android side channel** without moving coordinates off the desktop |
 
-Each button action uses one destination: its normal desktop proxy for desktop
-focus, Android `event4` for an ordinary pen in focused direct mode, or Android
-`event5` for the focused desktop side channel and Pro gestures. The relay never
-writes the same button frame to two destinations.
+**Auto details**
 
-The GNOME extension and KWin script follow Waydroid window moves, resizes,
-fullscreen changes, monitor scale and monitor position. Pen events outside the
-Waydroid content rectangle are suppressed in Android. GNOME Overview and KDE
-Overview temporarily select desktop routing while the policy is automatic.
+- Overview (GNOME/KDE) forces desktop routing while the overview is open.
+- Focus is debounced; a short **sticky** window reduces thrash on brief focus loss.
+- Mode switches are **tip-safe**: a pending change waits until the tip is up when needed.
 
-Android's keylayout performs only transport conversion. On the M80p/P81c
-pen device, scan codes `331/332` become `BUTTON_7/8`, which Android exposes as
-key codes `194/195`. On the Pro gesture device, scan codes `262–265` become
-`BUTTON_7–10`, exposed as `194–197`. P81c itself does not generate `194/195`;
-those two codes come from the gesture or ordinary-button transport and are
-handled by `xiaomi-penengine-compat`.
-Per-application behavior belongs in an Android compatibility module such as
-`xiaomi-penengine-compat`; the bridge does not contain Notein, Starnote, or
-other application-specific actions.
+**What policies are not**
+
+- They are not the same strings as runtime mode (`direct` never appears in the tray).
+- They do not assign Notein/Starnote actions; that belongs in an Android compat module.
+
+## Runtime modes (relay)
+
+| Mode | Pen coordinates | Ordinary pen buttons (M80p) | Pro gestures (P81c) |
+|------|-----------------|-----------------------------|---------------------|
+| **desktop** | Host desktop proxies | Desktop proxy, **or** Android `event5` side channel when Waydroid is focused | Desktop gesture proxy, or Android gesture path when focused / policy needs it |
+| **direct** | Android `event4` → active model proxy | On the pen node (`event4`) while focused; not dual-written to `event5` | Gestures on `event5` when the Pro source exists; Android maps scan codes to 194–197 when focused |
+
+Shared rules:
+
+- Both model proxies stay alive across mode switches (no destroy/recreate thrash).
+- `event4` exists only in **direct** and points at the **active** model.
+- `event5` is linked only when a side channel needs it.
+- **One destination per button frame** — never dual-write the same press.
+- Losing focus or entering Overview releases held Android pen buttons before further routing.
+- Outside the Waydroid content rectangle, pen samples are suppressed for Android (geometry from GNOME/KWin).
+
+### Pressure and axes
+
+| Model | Pressure | Notes |
+|-------|----------|--------|
+| M80p | `0..8191` | Stylus buttons `BTN_STYLUS` / `BTN_STYLUS2` |
+| P81c | `0..16383` | Optional brake; Pro gestures are a **separate** device |
+
+Y is mapped from the live source range to the stable tablet range without
+changing pressure contracts.
+
+### Android key transport (not app actions)
+
+Keylayout only remaps scan codes for transport:
+
+| Source | Scan codes | Android keycodes (typical) |
+|--------|------------|----------------------------|
+| Ordinary pen / M80p–P81c pen node | 331 / 332 | 194 / 195 |
+| Pro gesture device | 262–265 (`BTN_6`…`BTN_9`) | 194–197 |
+
+P81c pen frames themselves do not invent 194/195. App behavior (Notein, Starnote,
+…) belongs in something like [`xiaomi-penengine-compat`](https://github.com/phxinyang)
+— not in this bridge.
 
 ## Requirements
 
-- GNOME Shell 50 or KDE Plasma 6 / KWin 6
-- Waydroid 1.6.x
-- Python 3
-- `sudo`, `systemd`, `udevadm`, `visudo` and LXC
-- [`xiaomi-sheng-thp.service`](https://github.com/ianchb/xiaomi-sheng-thp) with
-  M80p/P81c `2717:3654` pen nodes and the
-  optional `0022:5081` `Xiaomi Focus Pen Pro Gestures` node
+- GNOME Shell 50 **or** KDE Plasma 6 / KWin 6  
+- Waydroid 1.6.x  
+- Python 3  
+- `sudo`, `systemd`, `udevadm`, `visudo`, LXC  
+- [`xiaomi-sheng-thp`](https://github.com/ianchb/xiaomi-sheng-thp) providing
+  M80p/P81c `2717:3654`, and optionally Pro gestures `0022:5081`
 
 ## Install
 
-### From GitHub Release (RPM / DEB)
+### From a GitHub Release (RPM / DEB)
 
-Packages are built by GitHub Actions on version tags (`v*`) and attached to the
-[Releases](https://github.com/phxinyang/waydroid-pen-bridge/releases) page.
+Tags `v*` build packages on Actions and attach them to
+[Releases](https://github.com/phxinyang/waydroid-pen-bridge/releases).
 
 ```bash
 # Fedora / RHEL-like
@@ -99,7 +123,7 @@ sudo dnf install ./waydroid-pen-bridge-*.noarch.rpm
 sudo apt install ./waydroid-pen-bridge_*.deb
 ```
 
-Then, after graphical login (if the tray / extension is missing):
+After graphical login, if the tray / extension is missing:
 
 ```bash
 waydroid-pen-bridge-user-setup
@@ -111,55 +135,46 @@ waydroid-pen-bridge-user-setup
 ./install.sh
 ```
 
-Both paths require Waydroid's LXC config and the
-[`xiaomi-sheng-thp`](https://github.com/ianchb/xiaomi-sheng-thp) unit. The
-bridge does not replace or uninstall that driver; it only hides the driver
-nodes from libinput and routes them through stable proxies.
+Both paths need Waydroid’s LXC config and a working **xiaomi-sheng-thp** unit.
+This project does **not** replace or uninstall the THP driver; it only ignores
+driver nodes for libinput and routes through proxies.
 
-Reboot once after installation. The reboot lets udev hide the physical pen
-before the desktop starts and lets the relay create the stable proxy before
-login.
+**Reboot once** after first install so udev hides physical pens before login and
+the relay creates stable proxies early.
 
-Desktop UI (GNOME extension / KDE tray) is configured by `user-setup.sh`
-(`waydroid-pen-bridge-user-setup` when installed from a package). `install.sh`
-also calls it. If the mode switch panel is missing after login:
+`install.sh` also runs user UI setup when possible. If the panel is still missing:
 
 ```bash
 ./user-setup.sh
 # or: waydroid-pen-bridge-user-setup
 ```
 
-On GNOME, enable `Waydroid Pen Mode` if needed. On KDE, check System Tray →
-Entries → Waydroid Pen Mode → Shown.
+- **GNOME:** enable extension `Waydroid Pen Mode` if needed.  
+- **KDE:** System Tray → Entries → Waydroid Pen Mode → **Shown**.
 
-Check the current runtime mode:
+### Check status
 
 ```bash
 sudo /usr/local/libexec/waydroid-pen-mode status
 ```
 
-Manual runtime selection:
+Low-level runtime knobs (normally driven by the session, not by hand):
 
 ```bash
 sudo /usr/local/libexec/waydroid-pen-mode desktop
 sudo /usr/local/libexec/waydroid-pen-mode direct
 sudo /usr/local/libexec/waydroid-pen-mode sync
-sudo /usr/local/libexec/waydroid-pen-mode focus 1
-sudo /usr/local/libexec/waydroid-pen-mode focus 0
+sudo /usr/local/libexec/waydroid-pen-mode focus 1   # enable Android button route when ready
+sudo /usr/local/libexec/waydroid-pen-mode focus 0   # release Android pen buttons
+sudo /usr/local/libexec/waydroid-pen-mode map X Y WIDTH HEIGHT   # normalized content rect
+sudo /usr/local/libexec/waydroid-pen-mode unmap                  # full-display identity
 ```
 
-`focus 1` enables the active pen's Android button route after checking
-`event5`; `focus 0` releases all Android pen buttons immediately. GNOME and KDE
-call these commands automatically from their window-focus monitors.
+GNOME/KDE call `focus` / `map` from window monitors. Prefer the **tray policy**
+for day-to-day use.
 
-Set a normalized Waydroid content rectangle manually:
-
-```bash
-sudo /usr/local/libexec/waydroid-pen-mode map X Y WIDTH HEIGHT
-sudo /usr/local/libexec/waydroid-pen-mode unmap
-```
-
-`unmap` restores full-display identity mapping.
+The installer enables Android’s built-in palm-rejection flag inside Waydroid; it
+applies on the next container start.
 
 ## Uninstall
 
@@ -167,13 +182,30 @@ sudo /usr/local/libexec/waydroid-pen-mode unmap
 ./uninstall.sh
 ```
 
-Uninstall removes the bridge only:
+If the bridge was installed with **rpm/dnf** or **deb/apt**, `uninstall.sh`
+detects that and removes the package via the package manager, then clears
+desktop UI and prints a verification checklist. Pure `install.sh` installs use
+the file-based cleanup path.
 
-- stops and disables `waydroid-pen-relay` / link-sync
-- removes udev rules, helpers, LXC pen mounts, Android overlay KL/KCM
-- removes GNOME extension and KDE plasmoid/KWin mode-switch UI from the tray
-- leaves [`xiaomi-sheng-thp`](https://github.com/ianchb/xiaomi-sheng-thp) installed
+Removes **only the bridge**:
 
-It restarts THP so physical pen nodes are recreated without
-`LIBINPUT_IGNORE_DEVICE`. A reboot is still recommended so every session picks
-up the restored devices cleanly.
+- stops relay / link-sync  
+- udev rules, helpers, LXC pen mounts, Android overlay KL/KCM  
+- GNOME extension and KDE plasmoid / KWin script  
+- **keeps** [xiaomi-sheng-thp](https://github.com/ianchb/xiaomi-sheng-thp)
+
+THP is restarted so physical pens return without `LIBINPUT_IGNORE_DEVICE`. A
+reboot is still recommended so every session rediscovers devices cleanly.
+
+## Architecture (short)
+
+| Component | Role |
+|-----------|------|
+| `waydroid-pen-relay` | Root data plane: read THP → uinput proxies; control socket |
+| `waydroid-pen-mode` | Root control: desktop/direct, focus, map, LXC `event4`/`event5` links |
+| `waydroid-pen-session` | User session: policy + focus/Overview → mode helper |
+| GNOME extension / KDE plasmoid + KWin script | UI + window geometry / focus |
+
+## License
+
+See [LICENSE](LICENSE).
