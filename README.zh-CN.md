@@ -6,7 +6,7 @@
 
 [English](README.md) | 简体中文
 
-## 特性
+## 功能
 
 - Linux 与 Waydroid 之间自动路由,跟随窗口焦点
 - 稳定的 uinput 代理,每次切换都不重建 —— 桌面始终看到同一组设备
@@ -24,8 +24,7 @@
 
 ## 安装
 
-打 `v*` 标签会在 GitHub Actions 上构建安装包,并挂到
-[Releases](https://github.com/phxinyang/waydroid-pen-bridge/releases)。
+安装包从 [Releases](https://github.com/phxinyang/waydroid-pen-bridge/releases) 下载:
 
 **Fedora 等**
 
@@ -39,7 +38,7 @@ sudo dnf install ./waydroid-pen-bridge-*.noarch.rpm
 sudo apt install ./waydroid-pen-bridge_*.deb
 ```
 
-**源码安装**(想改代码时)
+**源码安装**
 
 ```bash
 ./install.sh

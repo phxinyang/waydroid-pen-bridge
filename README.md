@@ -24,8 +24,7 @@ English | [简体中文](README.zh-CN.md)
 
 ## Install
 
-Tagging `v*` builds packages on GitHub Actions and attaches them to
-[Releases](https://github.com/phxinyang/waydroid-pen-bridge/releases).
+Grab a package from [Releases](https://github.com/phxinyang/waydroid-pen-bridge/releases):
 
 **Fedora / RHEL-like**
 
@@ -39,7 +38,7 @@ sudo dnf install ./waydroid-pen-bridge-*.noarch.rpm
 sudo apt install ./waydroid-pen-bridge_*.deb
 ```
 
-**From source** (for hacking on it)
+**From source**
 
 ```bash
 ./install.sh
