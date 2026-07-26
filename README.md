@@ -9,8 +9,8 @@ English | [简体中文](README.zh-CN.md)
 ## Features
 
 - Automatic routing between Linux and Waydroid that follows window focus
-- Stable uinput proxies that survive every switch — the desktop keeps seeing one set of devices
-- Both pen models handled live: M80p (`0–8191` pressure) and P81c (`0–16383`, with brake), plus optional Pro gestures
+- Stable uinput proxies that survive every switch, so the desktop keeps seeing one set of devices
+- Both pen models handled live: M80p (`0..8191` pressure) and P81c (`0..16383`, with brake), plus optional Pro gestures
 - Tip, pressure, tilt, and stylus buttons preserved on both sides
 - Native tray UI for GNOME 50 and KDE Plasma 6
 - Ships as RPM, DEB, or a source install
@@ -44,7 +44,7 @@ sudo apt install ./waydroid-pen-bridge_*.deb
 ./install.sh
 ```
 
-Every path needs a working `xiaomi-sheng-thp` unit and Waydroid's LXC config —
+Every path needs a working `xiaomi-sheng-thp` unit and Waydroid's LXC config:
 the bridge routes the THP pen, it does not replace it.
 
 > [!NOTE]
@@ -62,7 +62,7 @@ waydroid-pen-bridge-user-setup   # or ./user-setup.sh from a source checkout
 
 ## Use
 
-The tray toggle — GNOME Quick Settings or the KDE System Tray — offers three
+The tray toggle (GNOME Quick Settings or the KDE System Tray) offers three
 policies. Labels follow your locale (Auto / Waydroid / Desktop).
 
 | Policy | Pen goes to | Notes |
@@ -78,31 +78,34 @@ sudo /usr/local/libexec/waydroid-pen-mode status
 ```
 
 The `desktop`, `direct`, `focus`, `map`, and `unmap` subcommands exist too, but
-the session daemon calls them for you.
+the session calls them for you.
 
 ## How it works
 
-Two words are easy to mix up:
+`xiaomi-sheng-thp` exposes the raw M80p and P81c pen nodes, plus a Pro gesture
+node when present. udev hides them from libinput, so the desktop never reads
+them directly; it only sees the proxies the relay creates.
 
-- **Policy** is what you pick in the tray — `auto`, `waydroid`, or `desktop`. A long-lived preference.
-- **Runtime mode** is where the relay sends pen coordinates *right now* — `desktop` or `direct`. You never set this directly.
+`waydroid-pen-relay` runs as root and reads whichever pen is producing frames.
+Each model gets two resident proxies, one for the desktop and one hidden for
+Android, plus side channels for stylus buttons and Pro gestures. The proxies
+live as long as the relay does; switching models or modes never tears one down,
+it only changes which proxy gets written.
 
-They chain in one direction. Your policy feeds the session daemon; the session
-watches window focus and GNOME/KDE Overview, adds a little debounce and
-stickiness, and from that settles the relay into `desktop` or `direct` — which is
-what decides whether the pen lands on Linux or Android.
+Which one gets written is decided in two layers:
 
-Under the hood:
+- **Policy**: the `auto` / `waydroid` / `desktop` you pick in the tray. A long-lived preference.
+- **Runtime mode**: the relay's current `desktop` or `direct`, computed by the session from policy, window focus, and Overview, with debounce and stickiness on top. You never set it directly.
 
-- `xiaomi-sheng-thp` exposes the raw M80p and P81c pen nodes (and a Pro gesture node when present). udev hides those from libinput, so nothing on the desktop reads them directly.
-- `waydroid-pen-relay` runs as root, reads whichever pen is producing frames, and owns a stable set of uinput proxies: one desktop proxy per model, one hidden Android proxy per model, plus side channels for stylus buttons and Pro gestures. Both models stay alive the whole time; only the one actually drawing is written, and switching models never tears a proxy down.
-- In `desktop` mode the relay writes to the desktop proxies — and when a source frame already matches the proxy's axis layout, forwards it untouched, so the pen hot path stays cheap. In `direct` mode it maps frames into the focused Waydroid window's content rectangle, feeds the hidden Android proxies through LXC, and drops any sample that falls outside that rectangle.
+In `desktop` mode pen frames go to the desktop proxy, passed through untouched
+when they already match its axis layout, which keeps the pen hot path light. In
+`direct` mode the relay maps frames into the focused Waydroid window's content
+rectangle and feeds the hidden proxies through LXC; samples outside the
+rectangle are dropped.
 
-A few rules it holds to:
-
-- One destination per event. A button frame goes to the desktop proxy, the pen's own Android node, or the Android side channel — never two at once.
-- Switches are tip-safe: mid-stroke, a pending switch waits until you lift the pen.
-- Losing focus or opening Overview releases any held Android buttons first, so nothing sticks down.
+Three rules hold throughout: an event goes to exactly one destination; a mode
+switch waits for pen lift instead of cutting a stroke; losing focus or entering
+Overview releases any held Android buttons first.
 
 ## Details
 
@@ -117,24 +120,24 @@ A few rules it holds to:
 
 | Model | Pressure | Extras |
 |-------|----------|--------|
-| M80p | `0–8191` | `BTN_STYLUS` / `BTN_STYLUS2` |
-| P81c | `0–16383` | brake axis; Pro gestures are a separate device |
+| M80p | `0..8191` | `BTN_STYLUS` / `BTN_STYLUS2` |
+| P81c | `0..16383` | brake axis; Pro gestures are a separate device |
 
-Both proxies expose the same tablet space (X `0–30479`, Y `0–20319`). The relay
+Both proxies expose the same tablet space (X `0..30479`, Y `0..20319`). The relay
 maps each source's live Y range onto it and clamps pressure to the model's own
 range; it never rewrites the pressure protocol.
 
 **Android key mapping**
 
 The Android keylayout overlay maps the driver's Linux key codes onto Android's
-stable `BUTTON_7`–`BUTTON_10` transport. Turning that transport into app actions
-(for example keycodes 194–197 for Notein / Starnote) is a separate compat layer's
+stable `BUTTON_7..BUTTON_10` transport. Turning that transport into app actions
+(for example keycodes 194-197 for Notein / Starnote) is a separate compat layer's
 job, not this bridge's.
 
 | Source | Linux codes | Android transport |
 |--------|-------------|-------------------|
 | Pen buttons (M80p / P81c) | 331 / 332 | `BUTTON_7` / `BUTTON_8` |
-| Pro gestures | 262–265 | `BUTTON_7`–`BUTTON_10` |
+| Pro gestures | 262-265 | `BUTTON_7..BUTTON_10` |
 
 ## Architecture
 
@@ -151,12 +154,6 @@ job, not this bridge's.
 ./uninstall.sh
 ```
 
-It detects whether you installed from rpm/dnf or deb/apt and removes the package
-that way, then clears the desktop UI; a plain source install gets the file-level
-cleanup. Either way it restarts THP so the physical pen returns, and it leaves
-[xiaomi-sheng-thp](https://github.com/ianchb/xiaomi-sheng-thp) untouched. Reboot
-once so every session rediscovers devices cleanly.
-
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT License. See [LICENSE](LICENSE).
