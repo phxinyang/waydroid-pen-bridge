@@ -77,9 +77,6 @@ Leave it on **Auto** and forget about it. To see what the relay is doing:
 sudo /usr/local/libexec/waydroid-pen-mode status
 ```
 
-The `desktop`, `direct`, `focus`, `map`, and `unmap` subcommands exist too, but
-the session calls them for you.
-
 ## How it works
 
 `xiaomi-sheng-thp` exposes the raw M80p and P81c pen nodes, plus a Pro gesture
@@ -97,24 +94,21 @@ Which one gets written is decided in two layers:
 - **Policy**: the `auto` / `waydroid` / `desktop` you pick in the tray. A long-lived preference.
 - **Runtime mode**: the relay's current `desktop` or `direct`, computed by the session from policy, window focus, and Overview, with debounce and stickiness on top. You never set it directly.
 
-In `desktop` mode pen frames go to the desktop proxy, passed through untouched
-when they already match its axis layout, which keeps the pen hot path light. In
-`direct` mode the relay maps frames into the focused Waydroid window's content
-rectangle and feeds the hidden proxies through LXC; samples outside the
-rectangle are dropped.
-
-Three rules hold throughout: an event goes to exactly one destination; a mode
-switch waits for pen lift instead of cutting a stroke; losing focus or entering
-Overview releases any held Android buttons first.
-
-## Details
-
-**Runtime modes**
+Where the two modes route each input:
 
 | Mode | Pen coordinates | Stylus buttons (M80p) | Pro gestures (P81c) |
 |------|-----------------|-----------------------|---------------------|
 | **desktop** | Desktop proxy | Desktop proxy; or an Android side channel (`event5`) when Waydroid is focused | Desktop gesture proxy; or the Android gesture path when focused |
 | **direct** | Android `event4` (active model) | On the pen's own Android node | On `event5` when a Pro source exists |
+
+In `direct` mode frames travel through LXC into the container, mapped into the
+focused Waydroid window's content rectangle; samples outside it are dropped. In
+`desktop` mode a frame that already matches the proxy's axis layout goes through
+untouched, keeping the pen hot path light.
+
+Three rules hold throughout: an event goes to exactly one destination; a mode
+switch waits for pen lift instead of cutting a stroke; losing focus or entering
+Overview releases any held Android buttons first.
 
 **Pressure and axes**
 

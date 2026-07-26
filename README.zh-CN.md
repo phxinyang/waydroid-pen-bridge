@@ -76,9 +76,6 @@ Waydroid / 桌面）。
 sudo /usr/local/libexec/waydroid-pen-mode status
 ```
 
-`desktop`、`direct`、`focus`、`map`、`unmap` 这些子命令也在，但都由 session 替
-你调用。
-
 ## 工作原理
 
 `xiaomi-sheng-thp` 暴露原始的 M80p 和 P81c 笔节点，有 Pro 手势时也一并暴露。
@@ -93,21 +90,18 @@ udev 把这些节点对 libinput 隐藏，桌面读不到它们，只能看到 r
 - **策略（Policy）**：你在托盘里选的 `auto` / `waydroid` / `desktop`，一个长期偏好。
 - **运行模式（Runtime）**：relay 此刻的 `desktop` 或 `direct`，由 session 根据策略、窗口焦点和 Overview 算出来，带防抖和粘性，你从不直接设置。
 
-`desktop` 模式下笔迹进桌面代理，源帧已经符合代理轴布局时原样转发，笔的热路径
-保持轻。`direct` 模式下 relay 把笔迹映射进聚焦 Waydroid 窗口的内容区，经 LXC
-喂给隐藏代理，内容区之外的采样直接丢弃。
-
-三条规则贯穿始终：同一个事件只发给一个目的地；模式切换等抬笔，不打断笔画；失
-焦或进 Overview 时先释放按住的 Android 侧键，不留卡键。
-
-## 细节
-
-**运行模式**
+两种模式的走向：
 
 | 模式 | 笔坐标 | 侧键（M80p） | Pro 手势（P81c） |
 |------|--------|-------------|------------------|
 | **desktop** | 桌面代理 | 桌面代理；Waydroid 聚焦时走 Android 侧通道（`event5`） | 桌面手势代理；聚焦时走 Android 手势路径 |
 | **direct** | Android `event4`（当前型号） | 走笔自己的 Android 节点 | 有 Pro 源时走 `event5` |
+
+`direct` 的笔迹经 LXC 进容器，映射到聚焦 Waydroid 窗口的内容区，区外采样直接
+丢弃；`desktop` 的源帧符合代理轴布局时原样转发，笔的热路径保持轻。
+
+三条规则贯穿始终：同一个事件只发给一个目的地；模式切换等抬笔，不打断笔画；失
+焦或进 Overview 时先释放按住的 Android 侧键，不留卡键。
 
 **压感与轴**
 
