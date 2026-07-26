@@ -3,7 +3,7 @@
 English | [简体中文](README.zh-CN.md)
 
 Waydroid Pen Bridge switches Xiaomi Pad 6S Pro (`sheng`) stylus input between
-the **Linux desktop** and **Waydroid** without hot-plugging input devices.
+the **Linux desktop** and **Waydroid**.
 
 It builds on [xiaomi-sheng-thp](https://github.com/ianchb/xiaomi-sheng-thp) and
 routes pen traffic through stable uinput proxies to:
@@ -16,7 +16,6 @@ not rebuild them.
 
 ## Features
 
-- No hot-plug of the stylus device
 - Automatic pen routing between Linux and Waydroid
 - Stable uinput proxies that survive mode switches
 - M80p, P81c, and optional Pro gesture sources

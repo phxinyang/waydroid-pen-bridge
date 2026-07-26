@@ -3,7 +3,7 @@
 [English](README.md) | 简体中文
 
 Waydroid Pen Bridge 用于在 **Linux 桌面** 与 **Waydroid** 之间无缝切换小米平板
-6S Pro（`sheng`）触控笔输入，而**无需热插拔输入设备**。
+6S Pro（`sheng`）触控笔输入。
 
 它基于 [xiaomi-sheng-thp](https://github.com/ianchb/xiaomi-sheng-thp)，通过稳定的
 uinput 代理，将触控笔输入按当前策略动态路由到：
@@ -15,7 +15,6 @@ uinput 代理，将触控笔输入按当前策略动态路由到：
 
 ## Features
 
-- 无需热插拔触控笔设备
 - Linux 与 Waydroid 间自动切换笔输入
 - 稳定 uinput 代理，不因切换重建设备
 - 支持 M80p、P81c 与可选 Pro 手势设备
